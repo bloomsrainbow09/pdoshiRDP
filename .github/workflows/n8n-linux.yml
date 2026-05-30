@@ -36,12 +36,25 @@ jobs:
           JWT: ${{ secrets.N8N_JWT_SECRET }}
           WHURL: ${{ secrets.N8N_WEBHOOK_URL }}
           BLTOKEN: ${{ secrets.BROWSERLESS_TOKEN }}
+          CHROME_USER: ${{ secrets.CHROME_USER }}
+          CHROME_PASS: ${{ secrets.CHROME_PASS }}
         run: |
           echo "== start Browserless (self-hosted headless Chrome) =="
           docker network create n8nnet 2>/dev/null || true
           docker run -d --name browserless --restart unless-stopped --network n8nnet \
             -e "TOKEN=$BLTOKEN" -e "CONCURRENT=3" -e "TIMEOUT=120000" -e "QUEUED=10" \
             ghcr.io/browserless/chromium:latest
+          echo "== restore Chrome profile (if a backup exists) =="
+          mkdir -p "$HOME/chrome-config"
+          bash restore-chrome-profile.sh 2>/dev/null || echo "(no profile restore script yet / no backup)"
+          echo "== start visible Chrome (noVNC viewer + CDP on 9222) =="
+          docker run -d --name chromium --restart unless-stopped --network n8nnet \
+            --shm-size=2g -p 3000:3000 \
+            -e PUID=1000 -e PGID=1000 -e TITLE=Reddit-Chrome \
+            -e CUSTOM_USER="$CHROME_USER" -e PASSWORD="$CHROME_PASS" \
+            -e "CHROME_CLI=--remote-debugging-port=9222 --remote-debugging-address=0.0.0.0 --remote-allow-origins=*" \
+            -v "$HOME/chrome-config":/config \
+            lscr.io/linuxserver/chromium:latest
           echo "== start n8n =="
           docker run -d --name n8n --restart unless-stopped --network n8nnet -p 5678:5678 \
             -e DB_TYPE=postgresdb \
@@ -77,6 +90,9 @@ jobs:
           docker run --rm --network n8nnet curlimages/curl:8.11.0 -fsS --max-time 15 "http://browserless:3000/json/version?token=$BLTOKEN" \
             && echo "  ^ Browserless reachable from n8n network" \
             || { echo "Browserless not answering yet:"; docker logs --tail 15 browserless 2>&1 | head; }
+          echo "== visible Chrome (chromium) status =="
+          docker ps --filter name=chromium --format '{{.Names}}: {{.Status}}'
+          docker logs --tail 8 chromium 2>&1 | head -8 || true
 
       - name: Keep alive (exit before 6h kill)
         run: |
