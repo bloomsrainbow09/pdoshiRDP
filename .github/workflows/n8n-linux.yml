@@ -209,7 +209,21 @@ jobs:
           i=0
           while [ "$(date +%s)" -lt "$end" ]; do
             if ! docker ps --format '{{.Names}}' | grep -q '^n8n$'; then
-              echo "n8n container stopped unexpectedly:"; docker logs --tail 80 n8n || true; exit 1
+              # n8n has --restart unless-stopped; tolerate a transient blip (e.g. brief
+              # overlap with the next runner) instead of failing the whole run.
+              echo "[$(date -u +%T)] n8n not running; allowing auto-restart to recover..."
+              rec=0
+              for r in 1 2 3 4 5 6; do
+                sleep 10
+                if docker ps --format '{{.Names}}' | grep -q '^n8n$' && curl -fsS http://localhost:5678/healthz >/dev/null 2>&1; then rec=1; break; fi
+              done
+              if [ "$rec" != 1 ]; then
+                docker start n8n 2>/dev/null || true; sleep 15
+                if ! curl -fsS http://localhost:5678/healthz >/dev/null 2>&1; then
+                  echo "n8n unrecoverable after ~75s:"; docker logs --tail 80 n8n || true; exit 1
+                fi
+                echo "n8n recovered via restart"
+              fi
             fi
             echo "[$(date -u +%T)] n8n alive"
             i=$((i+1))
