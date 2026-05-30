@@ -38,15 +38,42 @@ jobs:
           BLTOKEN: ${{ secrets.BROWSERLESS_TOKEN }}
           CHROME_USER: ${{ secrets.CHROME_USER }}
           CHROME_PASS: ${{ secrets.CHROME_PASS }}
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+          GDRIVE_PROFILE_FOLDER: ${{ secrets.GDRIVE_PROFILE_FOLDER }}
+          PROFILE_ENC_PASSPHRASE: ${{ secrets.PROFILE_ENC_PASSPHRASE }}
         run: |
           echo "== start Browserless (self-hosted headless Chrome) =="
           docker network create n8nnet 2>/dev/null || true
           docker run -d --name browserless --restart unless-stopped --network n8nnet \
             -e "TOKEN=$BLTOKEN" -e "CONCURRENT=3" -e "TIMEOUT=120000" -e "QUEUED=10" \
             ghcr.io/browserless/chromium:latest
-          echo "== restore Chrome profile (if a backup exists) =="
+          echo "== restore Chrome profile from Drive (if a backup exists) =="
           mkdir -p "$HOME/chrome-config"
-          bash restore-chrome-profile.sh 2>/dev/null || echo "(no profile restore script yet / no backup)"
+          gdrive_token() {
+            curl -s -X POST https://oauth2.googleapis.com/token \
+              --data-urlencode "client_id=$GDRIVE_CLIENT_ID" \
+              --data-urlencode "client_secret=$GDRIVE_CLIENT_SECRET" \
+              --data-urlencode "refresh_token=$GDRIVE_REFRESH_TOKEN" \
+              --data-urlencode "grant_type=refresh_token" | jq -r '.access_token // empty'
+          }
+          restore_profile() {
+            local acc fid
+            acc=$(gdrive_token); [ -n "$acc" ] || { echo "  no Drive token"; return 1; }
+            fid=$(curl -s -H "Authorization: Bearer $acc" \
+              "https://www.googleapis.com/drive/v3/files?q='$GDRIVE_PROFILE_FOLDER'+in+parents+and+name='chrome-profile.tar.gz.enc'+and+trashed=false&fields=files(id)" \
+              | jq -r '.files[0].id // empty')
+            [ -n "$fid" ] || { echo "  no saved profile in Drive yet -> fresh start"; return 1; }
+            curl -s -H "Authorization: Bearer $acc" "https://www.googleapis.com/drive/v3/files/$fid?alt=media" -o /tmp/profile.enc || return 1
+            openssl enc -d -aes-256-cbc -pbkdf2 -pass pass:"$PROFILE_ENC_PASSPHRASE" -in /tmp/profile.enc -out /tmp/profile.tar.gz 2>/dev/null \
+              || { echo "  decrypt failed"; return 1; }
+            sudo tar xzf /tmp/profile.tar.gz -C "$HOME/chrome-config" 2>/dev/null \
+              && echo "  profile restored ($(sudo du -sh "$HOME/chrome-config" 2>/dev/null | cut -f1))" || { echo "  extract failed"; return 1; }
+            rm -f /tmp/profile.enc /tmp/profile.tar.gz
+          }
+          restore_profile || echo "  -> starting with a fresh Chrome profile"
+          sudo chown -R 1000:1000 "$HOME/chrome-config" 2>/dev/null || true
           echo "== start visible Chrome (noVNC viewer + CDP on 9222) =="
           docker run -d --name chromium --restart unless-stopped --network n8nnet \
             --shm-size=2g -p 3000:3000 \
@@ -94,15 +121,70 @@ jobs:
           docker ps --filter name=chromium --format '{{.Names}}: {{.Status}}'
           docker logs --tail 8 chromium 2>&1 | head -8 || true
 
-      - name: Keep alive (exit before 6h kill)
+      - name: Keep alive + persist Chrome profile (exit before 6h kill)
+        env:
+          GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
+          GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
+          GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
+          GDRIVE_PROFILE_FOLDER: ${{ secrets.GDRIVE_PROFILE_FOLDER }}
+          PROFILE_ENC_PASSPHRASE: ${{ secrets.PROFILE_ENC_PASSPHRASE }}
+          PROFILE_GIT_REPO: ${{ secrets.PROFILE_GIT_REPO }}
+          PROFILE_GIT_USER: ${{ secrets.PROFILE_GIT_USER }}
+          PROFILE_GIT_TOKEN: ${{ secrets.PROFILE_GIT_TOKEN }}
         run: |
+          gdrive_token() {
+            curl -s -X POST https://oauth2.googleapis.com/token \
+              --data-urlencode "client_id=$GDRIVE_CLIENT_ID" \
+              --data-urlencode "client_secret=$GDRIVE_CLIENT_SECRET" \
+              --data-urlencode "refresh_token=$GDRIVE_REFRESH_TOKEN" \
+              --data-urlencode "grant_type=refresh_token" | jq -r '.access_token // empty'
+          }
+          # Snapshot the live profile (cookies/logins/localstorage), encrypt, push to Drive (+git on final).
+          backup_profile() {  # $1 = "final" -> also force-push to git
+            [ -d "$HOME/chrome-config" ] || return 0
+            sudo tar czf /tmp/profile.tar.gz --warning=no-file-changed \
+              --exclude='*Cache*' --exclude='*Crashpad*' --exclude='*crx_cache*' \
+              --exclude='*Service Worker*' --exclude='*.log' \
+              -C "$HOME/chrome-config" . 2>/dev/null || true
+            [ -s /tmp/profile.tar.gz ] || { echo "  (nothing to back up)"; return 0; }
+            openssl enc -aes-256-cbc -salt -pbkdf2 -pass pass:"$PROFILE_ENC_PASSPHRASE" \
+              -in /tmp/profile.tar.gz -out /tmp/profile.enc
+            local acc; acc=$(gdrive_token)
+            if [ -n "$acc" ]; then
+              for old in $(curl -s -H "Authorization: Bearer $acc" \
+                  "https://www.googleapis.com/drive/v3/files?q='$GDRIVE_PROFILE_FOLDER'+in+parents+and+name='chrome-profile.tar.gz.enc'+and+trashed=false&fields=files(id)" \
+                  | jq -r '.files[].id'); do
+                curl -s -X DELETE -H "Authorization: Bearer $acc" "https://www.googleapis.com/drive/v3/files/$old" >/dev/null
+              done
+              curl -s -X POST "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart" \
+                -H "Authorization: Bearer $acc" \
+                -F "metadata={\"name\":\"chrome-profile.tar.gz.enc\",\"parents\":[\"$GDRIVE_PROFILE_FOLDER\"]};type=application/json;charset=UTF-8" \
+                -F "file=@/tmp/profile.enc;type=application/octet-stream" -o /dev/null \
+                && echo "  -> Drive updated ($(du -h /tmp/profile.enc | cut -f1))" || echo "  Drive upload failed"
+            else echo "  no Drive token (skip Drive)"; fi
+            if [ "$1" = final ] && [ -n "$PROFILE_GIT_TOKEN" ]; then
+              local d=/tmp/cp; rm -rf "$d"; mkdir -p "$d"; cp /tmp/profile.enc "$d/chrome-profile.tar.gz.enc"
+              ( cd "$d" && git init -q && git checkout -q -b main \
+                && git -c user.email=bot@runner -c user.name=runner add . \
+                && git -c user.email=bot@runner -c user.name=runner commit -q -m "profile snapshot" \
+                && git push -q -f "https://$PROFILE_GIT_USER:$PROFILE_GIT_TOKEN@${PROFILE_GIT_REPO#https://}" main \
+                && echo "  -> git updated" || echo "  git push failed" )
+            fi
+            rm -f /tmp/profile.tar.gz /tmp/profile.enc
+          }
           end=$(( $(date +%s) + 355*60 ))
+          i=0
           while [ "$(date +%s)" -lt "$end" ]; do
             if ! docker ps --format '{{.Names}}' | grep -q '^n8n$'; then
               echo "n8n container stopped unexpectedly:"; docker logs --tail 80 n8n || true; exit 1
             fi
             echo "[$(date -u +%T)] n8n alive"
+            i=$((i+1))
+            if [ $((i % 5)) -eq 0 ]; then echo "[$(date -u +%T)] profile backup..."; backup_profile; fi
             sleep 120
           done
-          echo "approaching 6h; stopping n8n cleanly so the next runner takes over."
+          echo "approaching 6h; clean profile snapshot, then hand off to next runner."
+          docker stop chromium 2>/dev/null || true
+          sleep 2
+          backup_profile final
           docker stop n8n || true
