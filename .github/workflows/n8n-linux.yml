@@ -43,6 +43,8 @@ jobs:
           GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
           GDRIVE_PROFILE_FOLDER: ${{ secrets.GDRIVE_PROFILE_FOLDER }}
           PROFILE_ENC_PASSPHRASE: ${{ secrets.PROFILE_ENC_PASSPHRASE }}
+          PROFILE_GIT_USER: ${{ secrets.PROFILE_GIT_USER }}
+          PROFILE_GIT_TOKEN: ${{ secrets.PROFILE_GIT_TOKEN }}
         run: |
           echo "== start Browserless (self-hosted headless Chrome) =="
           docker network create n8nnet 2>/dev/null || true
@@ -74,14 +76,25 @@ jobs:
           }
           restore_profile || echo "  -> starting with a fresh Chrome profile"
           sudo chown -R 1000:1000 "$HOME/chrome-config" 2>/dev/null || true
-          echo "== start visible Chrome (noVNC viewer + CDP on 9222) =="
+          echo "== fetch IG Post Export extension (always auto-loaded into the viewer) =="
+          rm -rf "$HOME/ig-ext"; mkdir -p "$HOME/ig-ext"
+          git clone -q --depth 1 "https://${PROFILE_GIT_USER}:${PROFILE_GIT_TOKEN}@github.com/prarthnadoshi/chrome-extensions.git" "$HOME/ig-ext" \
+            && echo "  extension fetched ($(ls "$HOME/ig-ext/ig-post-export" 2>/dev/null | wc -l) files)" \
+            || echo "  (extension fetch failed; viewer starts without it)"
+          sudo chown -R 1000:1000 "$HOME/ig-ext" 2>/dev/null || true
+          echo "== start visible Chrome (noVNC viewer + CDP on 9222 + IG extension) =="
           docker run -d --name chromium --restart unless-stopped --network n8nnet \
-            --shm-size=2g -p 3000:3000 \
+            --shm-size=2g -p 3000:3000 -p 127.0.0.1:9222:9222 \
             -e PUID=1000 -e PGID=1000 -e TITLE=Reddit-Chrome \
             -e CUSTOM_USER="$CHROME_USER" -e PASSWORD="$CHROME_PASS" \
-            -e "CHROME_CLI=--remote-debugging-port=9222 --remote-debugging-address=0.0.0.0 --remote-allow-origins=*" \
+            -e "CHROME_CLI=--remote-debugging-port=9222 --remote-debugging-address=0.0.0.0 --remote-allow-origins=* --load-extension=/extensions/ig-post-export --test-type" \
             -v "$HOME/chrome-config":/config \
+            -v "$HOME/ig-ext":/extensions:ro \
             lscr.io/linuxserver/chromium:latest
+          echo "== prepare cookie-sync (CDP 127.0.0.1:9222 -> Supabase n8n.browser_cookies) =="
+          ( cd /tmp && npm i chrome-remote-interface >/dev/null 2>&1 ) && echo "  chrome-remote-interface ready" || echo "  (cri install failed; cookie-sync will skip)"
+          docker pull postgres:17-alpine >/dev/null 2>&1 || true
+          echo "Y29uc3QgQ0RQID0gcmVxdWlyZSgnY2hyb21lLXJlbW90ZS1pbnRlcmZhY2UnKTsKKGFzeW5jICgpID0+IHsKICBsZXQgYzsKICB0cnkgewogICAgYyA9IGF3YWl0IENEUCh7IGhvc3Q6ICcxMjcuMC4wLjEnLCBwb3J0OiA5MjIyIH0pOwogICAgY29uc3QgeyBOZXR3b3JrIH0gPSBjOwogICAgY29uc3QgeyBjb29raWVzIH0gPSBhd2FpdCBOZXR3b3JrLmdldEFsbENvb2tpZXMoKTsKICAgIGNvbnN0IHdhbnQgPSB7IHJlZGRpdDogLyhefFwuKXJlZGRpdFwuY29tJC8sIGluc3RhZ3JhbTogLyhefFwuKWluc3RhZ3JhbVwuY29tJC8gfTsKICAgIGNvbnN0IG91dCA9IHt9OwogICAgZm9yIChjb25zdCBbcywgcmVdIG9mIE9iamVjdC5lbnRyaWVzKHdhbnQpKSB7CiAgICAgIGNvbnN0IGYgPSBjb29raWVzLmZpbHRlcih4ID0+IHJlLnRlc3QoeC5kb21haW4pKS5tYXAoeCA9PiAoeyBuYW1lOiB4Lm5hbWUsIHZhbHVlOiB4LnZhbHVlLCBkb21haW46IHguZG9tYWluLCBwYXRoOiB4LnBhdGggfSkpOwogICAgICBpZiAoZi5sZW5ndGgpIG91dFtzXSA9IGY7CiAgICB9CiAgICBwcm9jZXNzLnN0ZG91dC53cml0ZShKU09OLnN0cmluZ2lmeShvdXQpKTsKICB9IGNhdGNoIChlKSB7IHByb2Nlc3Muc3RkZXJyLndyaXRlKFN0cmluZyhlKSk7IH0KICBmaW5hbGx5IHsgaWYgKGMpIGF3YWl0IGMuY2xvc2UoKTsgfQp9KSgpOwo=" | base64 -d > /tmp/getcookies.js
           echo "== start n8n =="
           docker run -d --name n8n --restart unless-stopped --network n8nnet -p 5678:5678 \
             -e DB_TYPE=postgresdb \
@@ -131,6 +144,11 @@ jobs:
           PROFILE_GIT_REPO: ${{ secrets.PROFILE_GIT_REPO }}
           PROFILE_GIT_USER: ${{ secrets.PROFILE_GIT_USER }}
           PROFILE_GIT_TOKEN: ${{ secrets.PROFILE_GIT_TOKEN }}
+          DBH: ${{ secrets.N8N_DB_HOST }}
+          DBP: ${{ secrets.N8N_DB_PORT }}
+          DBN: ${{ secrets.N8N_DB_NAME }}
+          DBU: ${{ secrets.N8N_DB_USER }}
+          DBPW: ${{ secrets.N8N_DB_PASSWORD }}
         run: |
           gdrive_token() {
             curl -s -X POST https://oauth2.googleapis.com/token \
@@ -172,6 +190,21 @@ jobs:
             fi
             rm -f /tmp/profile.tar.gz /tmp/profile.enc
           }
+          # Pull the live cookies from the visible Chrome (CDP) and upsert reddit/instagram
+          # into Supabase n8n.browser_cookies, so any n8n/HTTP workflow can read the session.
+          sync_cookies() {
+            [ -f /tmp/getcookies.js ] || return 0
+            local json; json=$(NODE_PATH=/tmp/node_modules node /tmp/getcookies.js 2>/dev/null) || return 0
+            [ -n "$json" ] && [ "$json" != "{}" ] || { echo "  (no reddit/instagram cookies captured yet)"; return 0; }
+            local site cj hdr
+            for site in reddit instagram; do
+              cj=$(echo "$json" | jq -c --arg s "$site" '.[$s] // empty'); [ -n "$cj" ] || continue
+              hdr=$(echo "$cj" | jq -r 'map(.name+"="+.value)|join("; ")')
+              printf 'INSERT INTO n8n.browser_cookies(site,cookie_header,cookies_json,updated_at) VALUES($s$%s$s$,$h$%s$h$,$j$%s$j$::jsonb,now()) ON CONFLICT(site) DO UPDATE SET cookie_header=EXCLUDED.cookie_header,cookies_json=EXCLUDED.cookies_json,updated_at=now();' "$site" "$hdr" "$cj" \
+                | docker run --rm -i -e PGPASSWORD="$DBPW" postgres:17-alpine psql "host=$DBH port=$DBP dbname=$DBN user=$DBU sslmode=require" >/dev/null 2>&1 \
+                && echo "  cookies -> Supabase: $site ($(echo "$cj"|jq 'length') cookies)" || echo "  cookie upsert failed: $site"
+            done
+          }
           end=$(( $(date +%s) + 355*60 ))
           i=0
           while [ "$(date +%s)" -lt "$end" ]; do
@@ -180,10 +213,11 @@ jobs:
             fi
             echo "[$(date -u +%T)] n8n alive"
             i=$((i+1))
-            if [ $((i % 5)) -eq 0 ]; then echo "[$(date -u +%T)] profile backup..."; backup_profile; fi
+            if [ $((i % 5)) -eq 0 ]; then echo "[$(date -u +%T)] profile backup + cookie sync..."; backup_profile; sync_cookies; fi
             sleep 120
           done
-          echo "approaching 6h; clean profile snapshot, then hand off to next runner."
+          echo "approaching 6h; final cookie sync + clean profile snapshot, then hand off."
+          sync_cookies
           docker stop chromium 2>/dev/null || true
           sleep 2
           backup_profile final
