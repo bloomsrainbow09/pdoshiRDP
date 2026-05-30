@@ -150,6 +150,11 @@ jobs:
           DBU: ${{ secrets.N8N_DB_USER }}
           DBPW: ${{ secrets.N8N_DB_PASSWORD }}
         run: |
+          # This is a best-effort monitor + backup loop. GitHub runs steps with `bash -e`,
+          # which would let any single non-zero command (a root-owned temp file rm, a curl,
+          # a psql) kill the whole run. Disable errexit; the ONLY thing that should end the
+          # run is the explicit n8n-unrecoverable `exit 1` or the timer expiring.
+          set +e
           gdrive_token() {
             curl -s -X POST https://oauth2.googleapis.com/token \
               --data-urlencode "client_id=$GDRIVE_CLIENT_ID" \
@@ -188,7 +193,7 @@ jobs:
                 && git push -q -f "https://$PROFILE_GIT_USER:$PROFILE_GIT_TOKEN@${PROFILE_GIT_REPO#https://}" main \
                 && echo "  -> git updated" || echo "  git push failed" )
             fi
-            rm -f /tmp/profile.tar.gz /tmp/profile.enc
+            sudo rm -f /tmp/profile.tar.gz /tmp/profile.enc 2>/dev/null || true
           }
           # Pull the live cookies from the visible Chrome (CDP) and upsert reddit/instagram
           # into Supabase n8n.browser_cookies, so any n8n/HTTP workflow can read the session.
