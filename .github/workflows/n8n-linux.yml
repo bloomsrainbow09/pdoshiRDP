@@ -1,0 +1,80 @@
+name: n8n
+
+on:
+  workflow_dispatch:
+
+jobs:
+  n8n:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    steps:
+      - name: Trust Headscale CA + join mesh
+        env:
+          CA: ${{ secrets.HEADSCALE_CA_CERT }}
+          HS: ${{ secrets.HEADSCALE_URL }}
+          AK: ${{ secrets.TAILSCALE_AUTHKEY }}
+        run: |
+          echo "$CA" | sudo tee /usr/local/share/ca-certificates/headscale.crt >/dev/null
+          sudo update-ca-certificates
+          curl -fsSL https://tailscale.com/install.sh | sudo sh
+          sudo tailscale up --login-server="$HS" --authkey="$AK" --hostname=rdp-runner --accept-dns=false
+          ip=""
+          for i in $(seq 1 30); do ip=$(sudo tailscale ip -4 2>/dev/null); [ -n "$ip" ] && break; sleep 3; done
+          [ -n "$ip" ] || { echo "no mesh IP"; exit 1; }
+          echo "mesh IP: $ip"
+
+      - name: Run n8n (Docker, Supabase-backed)
+        env:
+          DBH: ${{ secrets.N8N_DB_HOST }}
+          DBP: ${{ secrets.N8N_DB_PORT }}
+          DBN: ${{ secrets.N8N_DB_NAME }}
+          DBU: ${{ secrets.N8N_DB_USER }}
+          DBPW: ${{ secrets.N8N_DB_PASSWORD }}
+          DBS: ${{ secrets.N8N_DB_SCHEMA }}
+          ENCKEY: ${{ secrets.N8N_ENCRYPTION_KEY }}
+          JWT: ${{ secrets.N8N_JWT_SECRET }}
+          WHURL: ${{ secrets.N8N_WEBHOOK_URL }}
+        run: |
+          docker run -d --name n8n --restart unless-stopped -p 5678:5678 \
+            -e DB_TYPE=postgresdb \
+            -e DB_POSTGRESDB_HOST="$DBH" \
+            -e DB_POSTGRESDB_PORT="$DBP" \
+            -e DB_POSTGRESDB_DATABASE="$DBN" \
+            -e DB_POSTGRESDB_USER="$DBU" \
+            -e DB_POSTGRESDB_PASSWORD="$DBPW" \
+            -e DB_POSTGRESDB_SCHEMA="$DBS" \
+            -e DB_POSTGRESDB_SSL_ENABLED=true \
+            -e DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED=false \
+            -e N8N_ENCRYPTION_KEY="$ENCKEY" \
+            -e N8N_USER_MANAGEMENT_JWT_SECRET="$JWT" \
+            -e WEBHOOK_URL="$WHURL" \
+            -e N8N_EDITOR_BASE_URL="$WHURL" \
+            -e N8N_SECURE_COOKIE=false \
+            -e EXECUTIONS_DATA_PRUNE=true \
+            -e EXECUTIONS_DATA_MAX_AGE=168 \
+            -e EXECUTIONS_DATA_PRUNE_MAX_COUNT=10000 \
+            -e N8N_DIAGNOSTICS_ENABLED=false \
+            -e GENERIC_TIMEZONE=Asia/Kolkata -e TZ=Asia/Kolkata \
+            docker.n8n.io/n8nio/n8n:latest
+          echo "waiting for n8n /healthz..."
+          ok=0
+          for i in $(seq 1 48); do
+            if curl -fsS http://localhost:5678/healthz >/dev/null 2>&1; then echo "n8n UP after ~$((i*5))s"; ok=1; break; fi
+            sleep 5
+          done
+          if [ "$ok" != 1 ]; then echo "n8n did not become healthy:"; docker logs --tail 60 n8n || true; exit 1; fi
+          docker logs --tail 15 n8n || true
+
+      - name: Keep alive (exit before 6h kill)
+        run: |
+          end=$(( $(date +%s) + 355*60 ))
+          while [ "$(date +%s)" -lt "$end" ]; do
+            if ! docker ps --format '{{.Names}}' | grep -q '^n8n$'; then
+              echo "n8n container stopped unexpectedly:"; docker logs --tail 80 n8n || true; exit 1
+            fi
+            echo "[$(date -u +%T)] n8n alive"
+            sleep 120
+          done
+          echo "approaching 6h; stopping n8n cleanly so the next runner takes over."
+          docker stop n8n || true
