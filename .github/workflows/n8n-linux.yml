@@ -134,6 +134,26 @@ jobs:
           docker ps --filter name=chromium --format '{{.Names}}: {{.Status}}'
           docker logs --tail 8 chromium 2>&1 | head -8 || true
 
+      - name: Checkout (mirror worker)
+        uses: actions/checkout@v4
+
+      - name: Start GitHub mirror worker (background, 15 parallel)
+        env:
+          SB_HOST: ${{ secrets.N8N_DB_HOST }}
+          SB_PORT: ${{ secrets.N8N_DB_PORT }}
+          SB_DB: ${{ secrets.N8N_DB_NAME }}
+          SB_USER: ${{ secrets.N8N_DB_USER }}
+          SB_PASSWORD: ${{ secrets.N8N_DB_PASSWORD }}
+          MIRROR_PARALLEL: "15"
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          cd mirror-worker
+          npm install pg --no-audit --no-fund
+          nohup node mirror_worker.js > "$RUNNER_TEMP/mirror.log" 2>&1 &
+          sleep 25
+          echo "==== mirror worker first output ===="
+          tail -n 25 "$RUNNER_TEMP/mirror.log" || true
+
       - name: Keep alive + persist Chrome profile (exit before 6h kill)
         env:
           GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
