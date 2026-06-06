@@ -75,6 +75,28 @@ jobs:
           Write-Host "Reach it through the EC2 public relay; the password is a repo secret."
           Write-Host "==========================================="
 
+      - name: Checkout repo (mirror worker)
+        uses: actions/checkout@v4
+
+      - name: Start GitHub mirror worker (background, 15 parallel)
+        shell: pwsh
+        env:
+          SB_HOST: ${{ secrets.N8N_DB_HOST }}
+          SB_PORT: ${{ secrets.N8N_DB_PORT }}
+          SB_DB: ${{ secrets.N8N_DB_NAME }}
+          SB_USER: ${{ secrets.N8N_DB_USER }}
+          SB_PASSWORD: ${{ secrets.N8N_DB_PASSWORD }}
+          MIRROR_PARALLEL: "15"
+          GIT_TERMINAL_PROMPT: "0"
+        run: |
+          cd mirror-worker
+          npm install pg --no-audit --no-fund | Out-Null
+          $p = Start-Process -FilePath "node" -ArgumentList "mirror_worker.js" -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP\mirror.out.log" -RedirectStandardError "$env:RUNNER_TEMP\mirror.err.log"
+          Start-Sleep 25
+          Write-Host ("mirror worker launched, PID {0}. First output:" -f $p.Id)
+          if (Test-Path "$env:RUNNER_TEMP\mirror.out.log") { Get-Content "$env:RUNNER_TEMP\mirror.out.log" -Tail 20 }
+          if (Test-Path "$env:RUNNER_TEMP\mirror.err.log") { Get-Content "$env:RUNNER_TEMP\mirror.err.log" -Tail 20 }
+
       - name: Keep alive (exit before 6h kill)
         shell: pwsh
         run: |
