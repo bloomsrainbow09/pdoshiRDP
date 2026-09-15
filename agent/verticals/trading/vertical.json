@@ -1,0 +1,389 @@
+{
+  "name": "trading",
+  "display_name": "Trading",
+  "enabled": true,
+  "source": {
+    "account": "india",
+    "telegram_folder": "Trading",
+    "channels": [
+      {
+        "id": -1003750056009,
+        "username": "OCEANS_OF_PROFIT_DIL_SE_GOKUL",
+        "title": "OCEANS OF PROFIT ™ 🔵",
+        "kind": "group",
+        "enabled": true
+      },
+      {
+        "id": -1003395740215,
+        "username": null,
+        "title": "Bhartiya Indian Stock Market",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1003045032742,
+        "username": "OCEANS_OF_PROFIT_011",
+        "title": "OCEANS OF PROFIT ™",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1002965468018,
+        "username": "OCEANS_OF_PROFIT_9",
+        "title": "OCEANS OF PROFIT ™",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1002402227105,
+        "username": "SANKHAT_BULLS_OCEANS_OF_PROFIT",
+        "title": "SANKHAT BULLS®",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1002114088558,
+        "username": "tradingbullstock",
+        "title": "Trading bull stock 📈",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1002056601007,
+        "username": "FinanceWithSunil",
+        "title": "Finance With Sunil",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001941085492,
+        "username": "sankhatbullls",
+        "title": "Sankhat Bulls®",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001902702356,
+        "username": "GtopGJ",
+        "title": "OCEANS OF PROFIT ™",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001900860893,
+        "username": "realtradelikealpha",
+        "title": "TradeLikeAlpha",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001880740639,
+        "username": "ipoworldlive",
+        "title": "IPO World 🧿 || Stock Market Updates",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001828105984,
+        "username": "stockyin",
+        "title": "Stockyin",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001764819286,
+        "username": "All_Market_IPO_News",
+        "title": "Stock market News Live",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001714206410,
+        "username": "gujtrader",
+        "title": "Gujrati_trader",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001692998212,
+        "username": "jovoaneshikho",
+        "title": "જોવો અને શીખો (𝙎𝙏𝙊𝘾𝙆𝙈𝘼𝙍𝙆𝙀𝙏)™",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001628425709,
+        "username": "GJ_stock",
+        "title": "Gujarat Stock Exchange",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001621715336,
+        "username": "gmpdadaupdates",
+        "title": "Stock Market News | IPO Market News | Commodity Currency News | General News || GMP DADA UPDATES",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001490862376,
+        "username": "Share_Market_Talks1",
+        "title": "Share Market Talks®",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001479680030,
+        "username": "Official_AngelOne",
+        "title": "Angel One",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001462101774,
+        "username": "ipo_ji",
+        "title": "IPO Ji ™️",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001458741905,
+        "username": null,
+        "title": "Bullss",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001419866656,
+        "username": "official_ipo_mantra",
+        "title": "IPO Mantra",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001377364394,
+        "username": "ipo_gmp_grey_market_premium",
+        "title": "IPO GMP | IPO GREY MARKET PREMIUM UPDATE | NSE IPO",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001325126813,
+        "username": "earnmoney_ali",
+        "title": "Earn Money💰💰",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001236360901,
+        "username": "TheWealthMagnet",
+        "title": "The Wealth Magnet",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001200363662,
+        "username": "stock_market_ipo",
+        "title": "Stock Market IPO - Every IPO Information & Daily Important Market News 📰📉",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001127834003,
+        "username": "ipogainss",
+        "title": "Ipo and Stocks | IPO GMP | IPO Allotment | IPO | Pranav Constructions IPO Allotment |",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001455698532,
+        "username": "Stockizenofficial",
+        "title": "Stockizen Research - SEBI Registered",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001972520728,
+        "username": "Trade_with_Mohit_Agrawal",
+        "title": "Trade with Mohit Agrawal",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001151692601,
+        "username": "indextradingnitin",
+        "title": "Index trading with CA Nitin Murarka (SMC)",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001459520520,
+        "username": "aakankshatrading",
+        "title": "Aakanksha Option Trading",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001793951670,
+        "username": "stockthunder",
+        "title": "Stock Thunder",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1003220712907,
+        "username": "Zero_To_Hero_trading_tipss",
+        "title": "ZERO TO HERO TRADING EXPERT ™",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001191350817,
+        "username": "STOCKGAINERSS",
+        "title": "Stock Gainers (SEBI Registered)",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1002425784249,
+        "username": "Tanisha_Garg_Analysis",
+        "title": "Tanisha Garg101 ANALYSIS (SEBI REGISTERED ™)",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1002415553083,
+        "username": "STOCK_ACE",
+        "title": "𝗦𝗧𝗢𝗖𝗞𝗔𝗖𝗘®",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001389090145,
+        "username": "stockpro_online",
+        "title": "Stockpro Online",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001655987511,
+        "username": "trad_with_sandeep",
+        "title": "Trade with Sandeep",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001372317602,
+        "username": "Sairam_Stocks",
+        "title": "Sairam Stocks",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1003717845622,
+        "username": "GujaratiTrader_24",
+        "title": "Gujarati Trader",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1002273596069,
+        "username": "The_Trading_Professor_sebi",
+        "title": "𝐓𝐇𝐄 𝐏𝐑𝐎𝐅𝐄𝐒𝐒𝐈𝐎𝐍𝐀𝐋 𝐓𝐑𝐀𝐃𝐄𝐑 (SEBI REGISTERED )",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001288100484,
+        "username": "Market_ResearchDesk",
+        "title": "Bharath’s Market Research (SEBI Registered)",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1004348427621,
+        "username": null,
+        "title": "CA NITIN TRADING",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001470229714,
+        "username": "Banknifty_specials",
+        "title": "20PAISA..COM ( Nifty & BankNifty Option )",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1002684092216,
+        "username": "Share_market_call1",
+        "title": "Trade With Rakesh Bansal",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1001246174619,
+        "username": "abhayvarn",
+        "title": "Trading with CA Abhay | SEBI REGISTERED RA",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1003804925006,
+        "username": "stockniftysebi",
+        "title": "STOCK NIFTY ( SEBI REGISTERED )",
+        "kind": "channel",
+        "enabled": true
+      },
+      {
+        "id": -1002025685792,
+        "username": null,
+        "title": "YOGITA TRADER SEBI REGISTERED ™",
+        "kind": "channel",
+        "enabled": true
+      }
+    ],
+    "exclude_ids": [
+      -1002231776653,
+      -1001950344261,
+      -1001884656148,
+      -1001836425391,
+      -1001728999101,
+      -1001641978399
+    ]
+  },
+  "select": {
+    "require_media": true,
+    "min_text_chars": 20,
+    "drop_if_matches": [
+      "(?i)\bjoin\b.*\bchannel\b",
+      "(?i)paid (group|calls)",
+      "(?i)dm for",
+      "(?i)refer(ral)? code"
+    ],
+    "dedupe_by_content_hash": true,
+    "max_per_day": 12
+  },
+  "render": {
+    "formats": [
+      "short",
+      "reel"
+    ],
+    "aspect": "9:16",
+    "max_duration_s": 58,
+    "burn_captions": true,
+    "watermark": "assets/watermark.png",
+    "intro": null,
+    "outro": null
+  },
+  "destinations": [],
+  "schedule": {
+    "timezone": "Asia/Kolkata",
+    "post_times": [
+      "09:15",
+      "12:30",
+      "15:45",
+      "19:00"
+    ]
+  }
+}

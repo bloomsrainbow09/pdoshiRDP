@@ -1,0 +1,179 @@
+{
+ "_comment": [
+  "Role -> fallback chain. Chains are CROSS-PROVIDER by design.",
+  "The failure actually observed here is a KEY-level 429 that takes out every model on",
+  "that key at once, so a chain that stays inside one provider does not survive it.",
+  "Each chain therefore spans nvidia -> kilo -> zai wherever possible.",
+  "",
+  "Every entry confirmed live 2026-09-13. Of the 82 models NVIDIA lists, only 11 answer;",
+  "/v1/models is a catalogue, not an entitlement. Probe before adding anything here.",
+  "json_mode is OFF everywhere: nemotron returns {\"\":\"\"} with it, mistral-nemotron",
+  "times out with it. Ask for JSON in the prompt and parse leniently instead."
+ ],
+ "defaults": {
+  "temperature": 0.0,
+  "json_mode": false,
+  "max_tokens": 600,
+  "timeout_s": 120,
+  "retries": 3,
+  "concurrency": 3
+ },
+ "_concurrency_note": "3, not 8. The key rate-limits at ~4+ sustained: a juror scored 38/200 at limit=8 and 190/200 at limit=3 with backoff.",
+ "roles": {
+  "guard": {
+   "purpose": "promo/chatter detection on every message — cheapest that is reliable",
+   "chain": [
+    [
+     "nvidia",
+     "openai/gpt-oss-20b"
+    ],
+    [
+     "kilo",
+     "liquid/lfm-2.5-2.6b:free"
+    ],
+    [
+     "nvidia",
+     "mistralai/mistral-nemotron"
+    ],
+    [
+     "zai",
+     "glm-4.5-flash"
+    ]
+   ],
+   "max_tokens": 300
+  },
+  "router": {
+   "purpose": "intent classification on every message — the hot path",
+   "chain": [
+    [
+     "nvidia",
+     "openai/gpt-oss-20b"
+    ],
+    [
+     "kilo",
+     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+    ],
+    [
+     "nvidia",
+     "nvidia/nemotron-3-super-120b-a12b"
+    ],
+    [
+     "zai",
+     "glm-4.5-flash"
+    ]
+   ],
+   "measured": {
+    "accuracy": 97.8,
+    "material_recall": 100.0,
+    "json_valid": 100.0,
+    "p50_ms": 1371,
+    "failures": 0,
+    "n": 90
+   }
+  },
+  "analyst": {
+   "purpose": "deep extraction on the ~10% that matter (IPO fields, materiality)",
+   "chain": [
+    [
+     "nvidia",
+     "nvidia/nemotron-3-super-120b-a12b"
+    ],
+    [
+     "nvidia",
+     "openai/gpt-oss-20b"
+    ],
+    [
+     "kilo",
+     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+    ],
+    [
+     "zai",
+     "glm-4.5-flash"
+    ]
+   ],
+   "max_tokens": 3000,
+   "_max_tokens_note": "3000, not 1200. nemotron-3-super is a REASONING model: at 1200 it spent the budget thinking and was cut mid-JSON on 4 of 12 hand-verified IPO posts (P7). The failure is silent from the caller's side — the call returns ok=True with a truncated body — so the budget has to be right rather than merely large enough on average."
+  },
+  "vision": {
+   "purpose": "chart / IPO-card screenshots",
+   "chain": [
+    [
+     "nvidia",
+     "google/gemma-4-31b-it"
+    ],
+    [
+     "nvidia",
+     "meta/llama-3.2-11b-vision-instruct"
+    ]
+   ],
+   "max_tokens": 1200,
+   "timeout_s": 300,
+   "_note": "gemma-4-31b-it read a synthetic IPO card with every field correct in 98s; llama-3.2-11b misread GMP 45 as 46, so it is fallback only and its numbers must be verified. Images MUST be downscaled to 1280px first — full-size screenshots time out."
+  },
+  "writer": {
+   "purpose": "compose the email — judged on plain-English clarity in P8",
+   "chain": [
+    [
+     "nvidia",
+     "nvidia/nemotron-3-super-120b-a12b"
+    ],
+    [
+     "nvidia",
+     "openai/gpt-oss-20b"
+    ],
+    [
+     "kilo",
+     "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free"
+    ],
+    [
+     "zai",
+     "glm-4.5-flash"
+    ]
+   ],
+   "max_tokens": 900
+  }
+ },
+ "known_dead": {
+  "_comment": "Probed and confirmed non-functional on this key. Do not re-add without re-probing.",
+  "http_404": [
+   "moonshotai/kimi-k2.6",
+   "nvidia/llama-3.1-nemotron-70b-instruct",
+   "nvidia/llama-3.1-nemotron-51b-instruct",
+   "mistralai/mistral-large-2-instruct",
+   "google/gemma-3-12b-it",
+   "microsoft/phi-3-vision-128k-instruct",
+   "nvidia/vila"
+  ],
+  "http_410_deprecated": [
+   "meta/llama-3.3-70b-instruct"
+  ],
+  "http_429_quota_exhausted": [
+   "nvidia/ising-calibration-1.5-31b"
+  ],
+  "timeout": [
+   "deepseek-ai/deepseek-v4-pro-0813",
+   "meta/llama-3.2-90b-vision-instruct"
+  ],
+  "too_slow": [
+   "moonshotai/kimi-k3 (67s)",
+   "z-ai/glm-5.3-flash (8.7s, reasoning)",
+   "mistralai/mistral-nemotron (5.8s, 91s under load)"
+  ],
+  "http_503_capacity": [
+   "poolside/laguna-xs-2.1 (nvidia) — scored 93.3% during the benchmark, then went 503 ResourceExhausted on every retry. REMOVED from all chains: a model whose capacity vanishes mid-day is not a fallback."
+  ],
+  "zai": [
+   "glm-4-flash (unknown model)",
+   "glm-4.5-air / glm-4.6 (429 insufficient balance)"
+  ],
+  "kilo": [
+   "kilo-auto/free (429)",
+   "nvidia/nemotron-3-ultra-550b-a55b:free (52s)"
+  ]
+ },
+ "_provider_note": {
+  "nvidia": "primary. 11 of 82 listed models work. Key-level 429 on sustained load.",
+  "kilo": "OpenRouter gateway, 377 models, 20 free. Needs HTTP-Referer + X-Title headers.",
+  "zai": "last resort only — glm-4.5-flash works but measured 11s and 42s. glm-4.5-air/4.6 return 429 insufficient-balance."
+ }
+}

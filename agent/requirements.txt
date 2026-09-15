@@ -1,0 +1,4 @@
+# Telethon comes from the local clone next door, editable:
+#   pip install -e ../Telethon
+cryptg>=0.5          # native AES; large media downloads are far faster with it
+psycopg2-binary>=2.9 # Supabase

@@ -1,0 +1,185 @@
+{
+  "_derivation": [
+    "Derived from the corpus, not invented. Frequencies are exact counts over ALL",
+    "823,142 archived messages (628,342 with text, 194,800 media-only), not a sample.",
+    "Method and evidence: agent/research/05-taxonomy.md, agent/bench/taxonomy_evidence.json.",
+    "",
+    "Two categories were DISCOVERED by reading the unmatched pile rather than assumed:",
+    "  stock_news  — company-specific news (order wins, stake changes, policy). The",
+    "                single largest thing a first-pass regex missed.",
+    "  fragment    — 33.9% of texted messages are <=20 chars: captions, reactions,",
+    "                emoji. Separated from `unknown` so escalation is not swamped.",
+    "",
+    "29.8% of texted messages still match NO hand-written rule at an average of 102",
+    "characters. That is the architectural case for an LLM router: a rules engine",
+    "cannot classify a third of substantive traffic."
+  ],
+  "version": "1.0",
+  "derived_at": "2026-09-13",
+  "corpus": {
+    "total_messages": 823142,
+    "texted": 628342,
+    "media_only": 194800,
+    "media_only_pct": 23.7
+  },
+  "confidence_threshold": {
+    "value": 0.70,
+    "_note": "Provisional. P6 calibrates this against the P3 holdout. Below it, the message goes to the Importance Assessor rather than being routed on a guess."
+  },
+  "intents": {
+    "ipo_new": {
+      "description": "A new IPO announced, RHP/DRHP filed, dates and price band published",
+      "action": "notify",
+      "priority": 1,
+      "freq_pct": 0.4,
+      "count": 2290,
+      "tier1_share": 82,
+      "_note": "Rarest high-value category and the most concentrated in tier1 (82%), which independently validates the tiering. IPO World leads the folder by a median 12.3h on these.",
+      "quiet_hours_override": false
+    },
+    "ipo_allotment": {
+      "description": "Allotment status out, allotment odds, subscription figures",
+      "action": "notify",
+      "priority": 1,
+      "freq_pct": 1.8,
+      "count": 10997,
+      "tier1_share": 64,
+      "quiet_hours_override": true,
+      "_note": "Time-critical: allotment windows close. Overrides quiet hours."
+    },
+    "ipo_gmp": {
+      "description": "Grey market premium figure or GMP table",
+      "action": "notify_on_threshold",
+      "priority": 2,
+      "freq_pct": 0.7,
+      "count": 4425,
+      "tier1_share": 63,
+      "threshold_rule": "notify when GMP >= 10% of the upper price band, or when it moves >= 5 percentage points from the last notified value for that IPO",
+      "_note": "Do not notify every GMP tick — they move daily. plan/04-decision-rules.md Gate 3 uses the 10% floor. Cross-check against a second channel before quoting: IPO World once posted LCC at 73 when trackers showed a high of 50."
+    },
+    "ipo_listing": {
+      "description": "Listing today, listed at, listing gain",
+      "action": "notify",
+      "priority": 1,
+      "freq_pct": 0.2,
+      "count": 1229,
+      "tier1_share": 51,
+      "quiet_hours_override": false
+    },
+    "regulatory": {
+      "description": "SEBI / RBI / exchange rule or policy change",
+      "action": "notify",
+      "priority": 1,
+      "freq_pct": 1.4,
+      "count": 9017,
+      "quiet_hours_override": true,
+      "_note": "Rare and always material. Longest average message in the corpus (438 chars) — these are substantive."
+    },
+    "stock_news": {
+      "description": "Company-specific news: order wins, stake changes, management commentary, sector policy",
+      "action": "notify_if_material",
+      "priority": 2,
+      "freq_pct": 2.8,
+      "count": 17342,
+      "_note": "DISCOVERED category — the largest miss of the first-pass regex. Needs a materiality check: most is minor."
+    },
+    "results": {
+      "description": "Quarterly results, profit, revenue, dividend announcements",
+      "action": "notify_if_material",
+      "priority": 2,
+      "freq_pct": 1.4,
+      "count": 8519
+    },
+    "market_news": {
+      "description": "Index/macro: Nifty, Sensex, market open/close, breaking macro",
+      "action": "notify_if_material",
+      "priority": 3,
+      "freq_pct": 4.8,
+      "count": 30370
+    },
+    "institutional": {
+      "description": "FII/DII/FPI flow data",
+      "action": "digest",
+      "priority": 3,
+      "freq_pct": 0.4,
+      "count": 2201,
+      "_note": "Daily rhythm, low individual value, useful as a daily roll-up."
+    },
+    "trade_call": {
+      "description": "A buy/sell recommendation with entry, target or stop-loss",
+      "action": "notify",
+      "priority": 2,
+      "freq_pct": 11.2,
+      "count": 70138,
+      "required_context": [
+        "source channel and its tier from tiers.json",
+        "whether a stop-loss was given — ranged 70% to 1% across channels and is the strongest quality marker",
+        "the channel's promo ratio when high",
+        "standing footnote that these are third-party calls, not verified"
+      ],
+      "_note": "DELIVERED, like every other intent. These are the user's own messages going to their own inbox; the system adds context, it does not withhold categories. Extract symbol/direction/entry/target/stop-loss so per-channel accuracy can be measured over time."
+    },
+    "education": {
+      "description": "Teaching content, strategy explainers, webinars",
+      "action": "digest",
+      "priority": 3,
+      "freq_pct": 1.4,
+      "count": 8628
+    },
+    "performance": {
+      "description": "Self-reported win claims: 'done of the day', '5/6 hit', 'no SL hit today'",
+      "action": "discard",
+      "priority": 4,
+      "freq_pct": 3.1,
+      "count": 19529,
+      "useless_tier_share": 42,
+      "_note": "Marketing, not information — unauditable by construction. 42% of it originates in the `useless` tier, which validates that tiering. Logged with a reason, never silently dropped."
+    },
+    "promotional": {
+      "description": "Join our channel, paid/premium group, referral, coupon, DM me",
+      "action": "discard",
+      "priority": 4,
+      "freq_pct": 5.2,
+      "count": 32814
+    },
+    "greeting": {
+      "description": "Good morning, welcome, thanks, festival greetings",
+      "action": "discard",
+      "priority": 4,
+      "freq_pct": 1.7,
+      "count": 10527
+    },
+    "fragment": {
+      "description": "<=20 characters with no signal: captions, reactions, emoji, single words",
+      "action": "discard",
+      "priority": 4,
+      "freq_pct": 33.9,
+      "count": 212976,
+      "_note": "The single largest bucket. Separated from `unknown` deliberately: escalating 213k fragments would bury the escalation path in noise it cannot act on. A fragment attached to MEDIA is not discarded — it goes to the vision path, because the content is in the image."
+    },
+    "unknown": {
+      "description": "Substantive text that fits no other category",
+      "action": "assess_importance",
+      "priority": 1,
+      "freq_pct": 29.8,
+      "count": 187340,
+      "avg_len": 102,
+      "_note": "NEVER discarded. 29.8% of texted messages at an average of 102 characters — far too large and too substantive to drop. This is the category that makes an LLM router necessary rather than a rules engine."
+    }
+  },
+  "escalation": {
+    "_rule": "The two-stage decision that makes 'never miss anything' real.",
+    "stage_1": "Is this promotional, performance-marketing, greeting, or a bare fragment? -> discard, LOGGED WITH A REASON. Never silent.",
+    "stage_2": "Not droppable, and the router's confidence is below threshold -> hand to the Importance Assessor, which asks one question: would a retail investor want to know this today? If yes -> notify, flagged UNCLASSIFIED.",
+    "invariant": "A message is NEVER dropped without a recorded decision and reason. Wrongly emailing the user is a minor cost; silently swallowing a material alert is the failure this system exists to prevent.",
+    "media_rule": "A message with media and little or no text is NOT a fragment — the content is in the image. Route to vision, then re-classify on the extracted text."
+  },
+  "delivery_actions": {
+    "notify": "email immediately, subject to rate limit and quiet hours",
+    "notify_on_threshold": "email only when the category's threshold_rule fires",
+    "notify_if_material": "analyst decides materiality, then email",
+    "assess_importance": "Importance Assessor decides, then email as UNCLASSIFIED",
+    "digest": "hold and roll into the daily digest",
+    "discard": "do not email; write the event and the reason to content.agent_events"
+  }
+}

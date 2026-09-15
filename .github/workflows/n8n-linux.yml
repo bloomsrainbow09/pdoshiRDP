@@ -9,6 +9,12 @@ jobs:
     timeout-minutes: 360
 
     steps:
+      # This workflow never checked out the repo — it only ever needed secrets and Docker
+      # images. The agent is code, and it is bind-mounted into its container from
+      # $GITHUB_WORKSPACE/agent, so the checkout is now load-bearing. ~6 MB.
+      - name: Checkout (the agent lives in this repo)
+        uses: actions/checkout@v4
+
       - name: Trust Headscale CA + join mesh
         env:
           CA: ${{ secrets.HEADSCALE_CA_CERT }}
@@ -26,6 +32,21 @@ jobs:
 
       - name: Run n8n (Docker, Supabase-backed)
         env:
+          SB_HOST: ${{ secrets.SB_HOST }}
+          SB_PORT: ${{ secrets.SB_PORT }}
+          SB_DB: ${{ secrets.SB_DB }}
+          SB_USER: ${{ secrets.SB_USER }}
+          SB_PASSWORD: ${{ secrets.SB_PASSWORD }}
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+          NVIDIA_API_KEY_2: ${{ secrets.NVIDIA_API_KEY_2 }}
+          ZAI_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          KILOCODE_TOKEN: ${{ secrets.KILOCODE_TOKEN }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_FROM: ${{ secrets.SMTP_FROM }}
+          ALERT_TO: ${{ secrets.ALERT_TO }}
           DBH: ${{ secrets.N8N_DB_HOST }}
           DBP: ${{ secrets.N8N_DB_PORT }}
           DBN: ${{ secrets.N8N_DB_NAME }}
@@ -134,6 +155,58 @@ jobs:
           docker ps --filter name=chromium --format '{{.Names}}: {{.Status}}'
           docker logs --tail 8 chromium 2>&1 | head -8 || true
 
+          # ── Telegram -> agent -> email ────────────────────────────────────────────
+          # A FOURTH container, started here rather than as its own step, because a step
+          # added after "Keep alive" would not begin until t=358 — two minutes before the
+          # 360-minute hard cap. The agent has to run CONCURRENTLY with the keep-alive.
+          #
+          # It does not touch the EC2 in any way: Telegram, Supabase, SMTP and the model
+          # providers are all reached directly from this runner, on GitHub's bandwidth.
+          # Nothing is relayed through socat and no EC2 egress is added.
+          #
+          # core/supervisor.py sleeps 720s before connecting. The EC2 dispatches this
+          # runner at the previous one's t=350 while that one lives to t≈359 — a measured
+          # 9.7-minute overlap — and two clients on one Telegram session can get the auth
+          # key REVOKED, which needs a human with a phone to undo. See that file.
+          echo "== start the trading agent (4th container) =="
+          cat > "$HOME/agent-entry.sh" <<'AGENTEOF'
+          set -eu
+          cd /app
+          echo "installing runtime deps..."
+          pip install --quiet --no-cache-dir psycopg2-binary httpx cryptg pyaes rsa
+          echo "deps ready; telethon comes from /app/vendor (pinned dab6bc4d)"
+          python -c "import telethon,sys;print('telethon',telethon.__version__,'ok')"
+          # 330 minutes live. The watcher exits on its own clock and releases the lease,
+          # which is what lets the NEXT runner acquire it without waiting out the TTL.
+          exec python -m core.supervisor --seconds 19800
+          AGENTEOF
+          sed -i 's/^          //' "$HOME/agent-entry.sh"
+          chmod +x "$HOME/agent-entry.sh"
+          docker run -d --name tg-agent --restart unless-stopped --network n8nnet \
+            --memory=1g --cpus=1.5 \
+            -v "$GITHUB_WORKSPACE/agent":/app:ro \
+            -v "$HOME/agent-entry.sh":/entry.sh:ro \
+            -e PYTHONPATH=/app:/app/vendor \
+            -e PYTHONUNBUFFERED=1 \
+            -e VERTICAL=trading             `# No TG_* here. The Telegram session, api_id and api_hash all live in`             `# content.source_accounts and are read from Supabase — the session string`             `# is full account control and never reaches GitHub.` \
+            -e TG_API_ID="$TG_API_ID" \
+            -e TG_API_HASH="$TG_API_HASH" \
+            -e TG_SESSION_STRING="$TG_SESSION_STRING" \
+            -e SB_HOST="$SB_HOST" -e SB_PORT="$SB_PORT" -e SB_DB="$SB_DB" \
+            -e SB_USER="$SB_USER" -e SB_PASSWORD="$SB_PASSWORD" \
+            -e NVIDIA_API_KEY="$NVIDIA_API_KEY" \
+            -e NVIDIA_API_KEY_2="$NVIDIA_API_KEY_2" \
+            -e ZAI_API_KEY="$ZAI_API_KEY" \
+            -e KILOCODE_TOKEN="$KILOCODE_TOKEN" \
+            -e SMTP_HOST="$SMTP_HOST" -e SMTP_PORT="$SMTP_PORT" \
+            -e SMTP_USER="$SMTP_USER" -e SMTP_PASSWORD="$SMTP_PASSWORD" \
+            -e SMTP_FROM="$SMTP_FROM" -e ALERT_TO="$ALERT_TO" \
+            python:3.12-slim bash /entry.sh
+          sleep 20
+          echo "== tg-agent status =="
+          docker ps --filter name=tg-agent --format '{{.Names}}: {{.Status}}'
+          docker logs --tail 15 tg-agent 2>&1 | head -20 || true
+
       - name: Keep alive + persist Chrome profile (exit before 6h kill)
         env:
           GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
@@ -231,10 +304,23 @@ jobs:
               fi
             fi
             echo "[$(date -u +%T)] n8n alive"
+            # tg-agent carries --restart unless-stopped, so Docker revives it after a
+            # crash on its own. This only REPORTS, deliberately: the run must not fail
+            # because the agent had a bad minute, but a six-hour silence must not be
+            # invisible either.
+            if docker ps --format '{{.Names}}' | grep -q '^tg-agent$'; then
+              echo "[$(date -u +%T)] tg-agent alive"
+            else
+              echo "[$(date -u +%T)] ! tg-agent NOT running — last 30 lines:"
+              docker logs --tail 30 tg-agent 2>&1 | tail -30 || true
+            fi
             i=$((i+1))
             if [ $((i % 5)) -eq 0 ]; then echo "[$(date -u +%T)] profile backup + cookie sync..."; backup_profile; sync_cookies; fi
             sleep 120
           done
+          echo "approaching 6h; stopping the agent first so it releases the Telegram lease."
+          docker stop -t 60 tg-agent 2>/dev/null || true
+          docker logs --tail 12 tg-agent 2>&1 | tail -12 || true
           echo "approaching 6h; final cookie sync + clean profile snapshot, then hand off."
           sync_cookies
           docker stop chromium 2>/dev/null || true

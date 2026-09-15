@@ -1,0 +1,8 @@
+# Nothing secret ever lands here — tools/package_runtime.py asserts that on the
+# assembled tree before it is copied in. This is belt and braces.
+.env*
+*.session
+.state/
+exports/
+__pycache__/
+*.py[cod]
