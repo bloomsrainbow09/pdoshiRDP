@@ -29,15 +29,29 @@ for _p in (str(HERE), str(ROOT), str(AGENT), str(AGENT / "templates"), str(AGENT
 
 from core import active as _active   # noqa: E402
 
-import wording as _wording           # noqa: E402  this folder — R3 moved it here
+VERTICAL_NAME = "trading"
 
-import glossary as _glossary          # noqa: E402  this folder — R5 moved it here
-import market as _market              # noqa: E402  this folder — R5 moved it here
-import boilerplate as _boilerplate    # noqa: E402  this folder — R6 moved it here
-import render as _render              # noqa: E402  this folder — R5 moved it here
-import signals as _signals            # noqa: E402  this folder — R5 moved it here
+
+
+# Every module in this folder is loaded BY PATH under a vertical-unique name, never as a
+# flat `import render`. Each vertical has its own render.py, wording.py, glossary.py and
+# so on, and Python resolves a flat import against sys.modules first — so whichever
+# vertical loaded first would silently hand its modules to every other one. That is not
+# hypothetical: `registry.load("trading")` was returning DEMO's renderer, and
+# `sys.modules["render"]` pointed at verticals/demo/render.py. The subagents package hit
+# the same trap in R7; this is the rest of it.
+def _own(mod: str):
+    return _active.module(mod, VERTICAL_NAME)
+
 
 name = "trading"
+
+_wording = _own('wording')
+_glossary = _own('glossary')
+_market = _own('market')
+_boilerplate = _own('boilerplate')
+_render = _own('render')
+_signals = _own('signals')
 
 def _own_subagents():
     """Load THIS vertical's subagents package under a unique module name.

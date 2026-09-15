@@ -121,6 +121,44 @@ def queue(ev: dict, notifier=None) -> dict:
             "verdict": v["action"], "why": v["why"]}
 
 
+
+def _freshen(row: dict) -> Message:
+    """Re-render a queued notification from its event, at SEND time.
+
+    `queue()` stores body_text and body_html on the row. That is the right thing for
+    deduplication — the fact signature has to be computed once — but it makes the body a
+    CACHE, and a cache of rendered output goes stale the moment a template changes.
+
+    It did. Rows queued before the template rewrite still carried the old labelled-
+    fragment style ("THEY SAID:", "WHAT IT SEEMS TO BE:", inline glosses like
+    "target (the price they expect it to reach)"), and releasing them from hold sent
+    those old emails days later. 48 rows were sitting in that state.
+
+    So the stored body is now a FALLBACK, not the source. Re-rendering from the event
+    means a template change reaches everything that has not gone out yet, which is what
+    anyone changing a template expects.
+
+    Never raises: if the event is gone or the vertical cannot render it, the stored body
+    is sent. Losing an email is worse than sending an old-looking one.
+    """
+    try:
+        ev = edb.fetch_one("SELECT * FROM content.agent_events WHERE id = %s",
+                           (row["event_id"],))
+        if ev:
+            msg, _key, _facts = compose(ev)
+            if msg.text and msg.text != (row["body_text"] or ""):
+                # Keep the row in step with what was actually sent, so the audit trail
+                # shows the email the reader received rather than the one queued.
+                edb.execute("UPDATE content.notifications SET subject=%s, body_text=%s, "
+                            "body_html=%s WHERE id=%s",
+                            (msg.subject[:300], msg.text, msg.html, row["id"]))
+            return msg
+    except Exception:
+        pass
+    return Message(row["subject"], row["body_text"] or "",
+                   row["body_html"] or "", row["template"] or "")
+
+
 def deliver(limit: int = 20, notifier=None) -> dict:
     """Send what is queued and due. The only place a row becomes `sent`."""
     notifier = notifier or default_notifier()
@@ -142,8 +180,8 @@ def deliver(limit: int = 20, notifier=None) -> dict:
                         (v.get("until"), v["why"], r["id"]))
             stats["skipped"] += 1
             continue
-        receipt = notifier.send(Message(r["subject"], r["body_text"] or "",
-                                        r["body_html"] or "", r["template"] or ""))
+        msg = _freshen(r)
+        receipt = notifier.send(msg)
         if receipt.ok:
             # Only now. Everything above this line is reversible; this line is not.
             adb.mark_sent(r["id"])
