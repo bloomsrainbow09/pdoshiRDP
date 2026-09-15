@@ -180,7 +180,8 @@ jobs:
           # which is what lets the NEXT runner acquire it without waiting out the TTL.
           exec python -m core.supervisor --seconds 19800
           AGENTEOF
-          sed -i 's/^          //' "$HOME/agent-entry.sh"
+          # No dedent needed: GitHub strips the block indentation from a `run: |` body
+          # before executing it, so the heredoc lands at column 0 already.
           chmod +x "$HOME/agent-entry.sh"
           docker run -d --name tg-agent --restart unless-stopped --network n8nnet \
             --memory=1g --cpus=1.5 \
@@ -209,6 +210,12 @@ jobs:
 
       - name: Keep alive + persist Chrome profile (exit before 6h kill)
         env:
+          SB_HOST: ${{ secrets.SB_HOST }}
+          SB_PORT: ${{ secrets.SB_PORT }}
+          SB_DB: ${{ secrets.SB_DB }}
+          SB_USER: ${{ secrets.SB_USER }}
+          SB_PASSWORD: ${{ secrets.SB_PASSWORD }}
+          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
           GDRIVE_CLIENT_ID: ${{ secrets.GDRIVE_CLIENT_ID }}
           GDRIVE_CLIENT_SECRET: ${{ secrets.GDRIVE_CLIENT_SECRET }}
           GDRIVE_REFRESH_TOKEN: ${{ secrets.GDRIVE_REFRESH_TOKEN }}
@@ -321,6 +328,59 @@ jobs:
           echo "approaching 6h; stopping the agent first so it releases the Telegram lease."
           docker stop -t 60 tg-agent 2>/dev/null || true
           docker logs --tail 12 tg-agent 2>&1 | tail -12 || true
+
+          # ── encrypted backup of content/ , from THIS RUNNER ───────────────────────
+          # Zero EC2 egress: the dump goes straight from here to Drive. Uses the
+          # postgres:17-alpine image the cookie sync already pulls.
+          echo "== backing up the content schema =="
+          ts=$(date -u +%Y%m%d-%H%M)
+          if docker run --rm -e PGPASSWORD="$SB_PASSWORD" postgres:17-alpine \
+               pg_dump "host=$SB_HOST port=$SB_PORT dbname=$SB_DB user=$SB_USER sslmode=require" \
+               --schema=content --no-owner --no-privileges 2>/dev/null | gzip > /tmp/content.sql.gz; then
+            sz=$(stat -c%s /tmp/content.sql.gz)
+            if [ "$sz" -gt 1000 ]; then
+              openssl enc -aes-256-cbc -salt -pbkdf2 -pass pass:"$PROFILE_ENC_PASSPHRASE" \
+                -in /tmp/content.sql.gz -out /tmp/content.enc
+              AT=$(curl -s -X POST https://oauth2.googleapis.com/token \
+                    --data-urlencode "client_id=$GDRIVE_CLIENT_ID" \
+                    --data-urlencode "client_secret=$GDRIVE_CLIENT_SECRET" \
+                    --data-urlencode "refresh_token=$GDRIVE_REFRESH_TOKEN" \
+                    --data-urlencode "grant_type=refresh_token" | jq -r '.access_token // empty')
+              if [ -n "$AT" ]; then
+                # SEARCH THEN CREATE. Under the drive.file scope this app can only reach
+                # folders it made itself; trusting a hand-made folder id is what has been
+                # failing the EC2's n8n-backup on every run with "resumable init failed".
+                FID=$(curl -s -H "Authorization: Bearer $AT" \
+                  "https://www.googleapis.com/drive/v3/files?q=name='telegram-agent'+and+'$GDRIVE_FOLDER_ID'+in+parents+and+mimeType='application/vnd.google-apps.folder'+and+trashed=false&fields=files(id)" \
+                  | jq -r '.files[0].id // empty')
+                if [ -z "$FID" ]; then
+                  FID=$(curl -s -X POST "https://www.googleapis.com/drive/v3/files?fields=id" \
+                    -H "Authorization: Bearer $AT" -H "Content-Type: application/json" \
+                    -d "{\"name\":\"telegram-agent\",\"mimeType\":\"application/vnd.google-apps.folder\",\"parents\":[\"$GDRIVE_FOLDER_ID\"]}" | jq -r .id)
+                  echo "  created Drive folder telegram-agent ($FID)"
+                fi
+                curl -s -X POST "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart" \
+                  -H "Authorization: Bearer $AT" \
+                  -F "metadata={\"name\":\"content-$ts.sql.gz.enc\",\"parents\":[\"$FID\"]};type=application/json;charset=UTF-8" \
+                  -F "file=@/tmp/content.enc;type=application/octet-stream" -o /dev/null \
+                  && echo "  content-$ts.sql.gz.enc ($(numfmt --to=iec $sz)) -> Drive/telegram-agent" \
+                  || echo "  ! Drive upload failed"
+                # keep the last 14
+                curl -s -H "Authorization: Bearer $AT" \
+                  "https://www.googleapis.com/drive/v3/files?q='$FID'+in+parents+and+trashed=false&orderBy=createdTime+desc&fields=files(id,name)" \
+                  | jq -r '.files[14:][]?.id' | while read -r old; do
+                      curl -s -X DELETE -H "Authorization: Bearer $AT" "https://www.googleapis.com/drive/v3/files/$old" -o /dev/null
+                    done
+              else
+                echo "  ! no Drive token — skipping (git + the EC2 daily dump still cover this)"
+              fi
+            else
+              echo "  ! dump suspiciously small ($sz bytes) — not uploading a truncated backup"
+            fi
+          else
+            echo "  ! pg_dump failed — content is still in the EC2 daily full dump"
+          fi
+          rm -f /tmp/content.sql.gz /tmp/content.enc
           echo "approaching 6h; final cookie sync + clean profile snapshot, then hand off."
           sync_cookies
           docker stop chromium 2>/dev/null || true
