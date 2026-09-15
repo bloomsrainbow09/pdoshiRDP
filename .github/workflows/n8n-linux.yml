@@ -183,7 +183,11 @@ jobs:
           # No dedent needed: GitHub strips the block indentation from a `run: |` body
           # before executing it, so the heredoc lands at column 0 already.
           chmod +x "$HOME/agent-entry.sh"
-          docker run -d --name tg-agent --restart unless-stopped --network n8nnet \
+          # --restart ON-FAILURE, not unless-stopped. The supervisor exits 0 after its
+          # clean 330-minute finish; `unless-stopped` would restart it, it would sleep
+          # 720s and then RE-ACQUIRE the Telegram lease at t~345-358 — precisely the
+          # window the next runner needs it in. Exit 1 (lease refused) still restarts.
+          docker run -d --name tg-agent --restart on-failure:10 --network n8nnet \
             --memory=1g --cpus=1.5 \
             -v "$GITHUB_WORKSPACE/agent":/app:ro \
             -v "$HOME/agent-entry.sh":/entry.sh:ro \
@@ -311,7 +315,7 @@ jobs:
               fi
             fi
             echo "[$(date -u +%T)] n8n alive"
-            # tg-agent carries --restart unless-stopped, so Docker revives it after a
+            # tg-agent carries --restart on-failure, so Docker revives it after a
             # crash on its own. This only REPORTS, deliberately: the run must not fail
             # because the agent had a bad minute, but a six-hour silence must not be
             # invisible either.

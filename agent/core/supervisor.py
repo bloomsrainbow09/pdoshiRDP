@@ -75,25 +75,32 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] supervisor: {msg}", flush=True)
 
 
-async def _acquire(account: str) -> bool:
-    """Wait for the lease rather than refusing.
+async def _run_watcher(vertical: str, account: str, seconds: int) -> dict:
+    """Start the watcher, retrying while another runner still holds the lease.
 
-    Returns False only after LEASE_RETRY_FOR_S, and the caller then exits 0 — never
-    crash-looping, never forcing. A runner that cannot get the lease is a runner whose
-    predecessor is still alive, and the right response is to leave it alone.
+    The retry wraps `watcher.run()` itself rather than probing the lease first. An
+    earlier version acquired the lease here, released it, and handed over to
+    `watcher.run()` to acquire it again — which left a window, however small, in which
+    the overlapping runner could take it between the release and the re-acquire. The
+    lease exists to make that impossible, so it must be taken exactly once, by the code
+    that holds it.
+
+    `watcher.run()` returns `{"refused": True}` rather than raising when the lease is
+    held. That is the signal to wait, not to fail: a runner that cannot get the lease is
+    one whose predecessor is still alive, and the right response is to leave it alone.
     """
     deadline = time.time() + LEASE_RETRY_FOR_S
     attempt = 0
     while True:
-        if adb.acquire_lease(account, WORKER, watcher.LEASE_SECONDS):
-            adb.release_lease(account, WORKER)     # hand it straight to watcher.run()
-            return True
+        stats = await watcher.run(vertical, account, duration_s=seconds)
+        if not stats.get("refused"):
+            return stats
         attempt += 1
         if time.time() >= deadline:
             log(f"lease for '{account}' still held after {LEASE_RETRY_FOR_S}s "
-                f"({attempt} attempts) — the previous runner is still alive. "
-                f"Exiting 0 rather than forcing; the next cycle will get it.")
-            return False
+                f"({attempt} attempts) — the previous runner is still alive. Exiting 0 "
+                f"rather than forcing; Docker's restart policy will try again.")
+            return {"refused": True, "attempts": attempt}
         log(f"lease held by another worker; retry {attempt} in {LEASE_RETRY_S}s")
         await asyncio.sleep(LEASE_RETRY_S)
 
@@ -144,17 +151,20 @@ async def run(seconds: int, vertical: str | None = None,
             f"runner overlaps this one by ~9.7 min and two clients on one session can "
             f"get the auth key revoked")
         await asyncio.sleep(HANDOFF_SLEEP_S)
-        seconds = max(60, seconds - HANDOFF_SLEEP_S)
+        # `--seconds` is the LIVE window, not the container lifetime. Subtracting the
+        # sleep from it as well used to end the watcher at t=333 while the keep-alive
+        # ran to t=358 — 25 minutes of coverage discarded on every single cycle.
 
-    if not await _acquire(cfg_account):
-        return {"refused": True, "worker": WORKER}
 
     stop = asyncio.Event()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            asyncio.get_running_loop().add_signal_handler(sig, stop.set)
-        except (NotImplementedError, AttributeError):
-            pass                                    # Windows
+    # NOT registered here. `watcher.run()` installs its own SIGTERM handler, and
+    # `add_signal_handler` REPLACES rather than chains — so whichever registers last
+    # wins. It happened to be the watcher, which is the outcome we want (SIGTERM must
+    # reach the thing holding the Telegram lease so it releases on the way out), but by
+    # accident. Leaving it to the watcher makes that explicit: `docker stop -t 60`
+    # sends SIGTERM, the watcher exits cleanly, releases the lease, and the companion
+    # loops below are cancelled in the `finally`. If both registered, the winner would
+    # depend on start order.
 
     log(f"going live for {seconds}s ({seconds/60:.0f} min)")
     t0 = time.time()
@@ -164,7 +174,7 @@ async def run(seconds: int, vertical: str | None = None,
         return None
 
     tasks = [
-        asyncio.create_task(watcher.run(v, cfg_account, duration_s=seconds), name="watcher"),
+        asyncio.create_task(_run_watcher(v, cfg_account, seconds), name="watcher"),
         asyncio.create_task(_every(DRAIN_EVERY_S, "drain",
                                    lambda: orchestrator.run(limit=200), stop), name="drain"),
         asyncio.create_task(_every(DELIVER_EVERY_S, "deliver",
