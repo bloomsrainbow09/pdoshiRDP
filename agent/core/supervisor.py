@@ -165,18 +165,43 @@ async def run(seconds: int, vertical: str | None = None,
               account: str | None = None, do_sleep: bool = True) -> dict:
     v = vertical or active.name()
     plugin = registry.current()
-    cfg_account = account or watcher.verticals.load(v).get("source", {}).get("account")
+    home = account or watcher.verticals.load_any(v).get("source", {}).get("account")
 
     watch = WATCH_VERTICALS if WATCH_VERTICALS != "*" else "*"
     drain = DRAIN_VERTICALS or [v]
+
+    # Which ACCOUNTS to watch, not just which verticals.
+    #
+    # A lease covers one session, so one watcher covers one account — and a vertical may
+    # span several. At least one here does, with two channels on its home account and
+    # three on the other holding 98% of its files. Watching only the active vertical's
+    # own account left that entire majority uncaptured.
+    #
+    # Different accounts are independent authorizations, so one client each is safe and
+    # concurrent — it is sharing ONE session that is forbidden, not holding two.
     if watch == "*":
-        capturing = watcher.verticals_on(cfg_account) or [v]
+        accounts_map = {}
+        for acct in sorted(watcher.accounts_with_verticals()):
+            names = watcher.verticals_on(acct)
+            if names:
+                accounts_map[acct] = names
+        if not accounts_map:
+            accounts_map = {home: [v]}
     else:
         capturing = [x.strip() for x in watch.split(",") if x.strip()]
-    log(f"vertical={v} plugin={plugin.name} account={cfg_account} worker={WORKER}")
-    log(f"capturing {capturing} | draining (emailing) {drain}")
-    if set(capturing) - set(drain):
-        log(f"  note: {sorted(set(capturing) - set(drain))} are captured but NOT "
+        accounts_map = {}
+        for name in capturing:
+            for acct in watcher.accounts_for(name):
+                accounts_map.setdefault(acct, []).append(name)
+
+    every = sorted({n for names in accounts_map.values() for n in names})
+    log(f"vertical={v} plugin={plugin.name} home={home} worker={WORKER}")
+    for acct, names in accounts_map.items():
+        n = len(watcher.watched_channels(names, acct))
+        log(f"  watching {acct:<8} {n:>3} channels  {names}")
+    log(f"draining (emailing) {drain}")
+    if set(every) - set(drain):
+        log(f"  note: {sorted(set(every) - set(drain))} are captured but NOT "
             f"emailed — their rows accumulate for taxonomy derivation. Add them to "
             f"DRAIN_VERTICALS once their prompts are validated.")
 
@@ -207,25 +232,54 @@ async def run(seconds: int, vertical: str | None = None,
         resilience.beat(WORKER, f"supervisor {v}")
         return None
 
+    # One watcher per ACCOUNT, run concurrently. Each takes the lease for its own
+    # session, so they never contend with each other — only with another process on the
+    # same account, which is exactly what the lease is for.
+    watchers = [
+        asyncio.create_task(_run_watcher(names, acct, seconds), name=f"watch:{acct}")
+        for acct, names in accounts_map.items()
+    ]
     tasks = [
-        asyncio.create_task(_run_watcher(capturing, cfg_account, seconds), name="watcher"),
+        *watchers,
         asyncio.create_task(_every(DRAIN_EVERY_S, "drain",
                                    lambda: orchestrator.run(limit=200, verticals=drain), stop), name="drain"),
         asyncio.create_task(_every(DELIVER_EVERY_S, "deliver",
                                    lambda: send.run(limit=50), stop), name="deliver"),
         asyncio.create_task(_every(REPORT_EVERY_S, "report", _report, stop), name="report"),
+        # Park what nobody drains, on the same cadence as the report. Without it the
+        # undecided count grows by ~2,000 a cycle and stops being a health signal — a
+        # genuinely stuck trading row would be invisible among rows undecided by design.
+        asyncio.create_task(_every(REPORT_EVERY_S, "park",
+                                   lambda: adb.park_undrained(drain), stop), name="park"),
         asyncio.create_task(_every(60, "heartbeat", heartbeat, stop), name="heartbeat"),
     ]
 
     try:
-        # The watcher owns the clock: it exits on its own `duration_s`, and everything
-        # else is a companion loop that stops when it does.
-        stats = await tasks[0]
+        # The watchers own the clock: each exits on its own `duration_s`, and everything
+        # else is a companion loop that stops when they do. Waiting for ALL of them
+        # rather than the first matters now that there is more than one — returning on
+        # the first would cancel the others mid-capture and strand their leases.
+        done = await asyncio.gather(*watchers, return_exceptions=True)
+        stats = {}
+        for acct, r in zip(accounts_map, done):
+            if isinstance(r, BaseException):
+                log(f"watcher for '{acct}' FAILED {type(r).__name__}: {str(r)[:140]}")
+                stats.setdefault("failed_accounts", []).append(acct)
+                continue
+            for k, val in (r or {}).items():
+                if isinstance(val, int):
+                    stats[k] = stats.get(k, 0) + val
+            if r.get("refused"):
+                stats.setdefault("refused_accounts", []).append(acct)
+        # `refused` for the whole run only if EVERY account refused; one busy session
+        # must not make the exit code claim nothing ran.
+        stats["refused"] = len(stats.get("refused_accounts", [])) == len(accounts_map)
     finally:
         stop.set()
-        for t in tasks[1:]:
+        companions = [t for t in tasks if t not in watchers]
+        for t in companions:
             t.cancel()
-        await asyncio.gather(*tasks[1:], return_exceptions=True)
+        await asyncio.gather(*companions, return_exceptions=True)
 
     # One last drain and deliver, so anything captured in the final seconds still goes out
     # rather than waiting for the next runner.

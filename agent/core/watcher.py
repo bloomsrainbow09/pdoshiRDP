@@ -118,11 +118,55 @@ def verticals_on(account: str) -> list:
             continue
         if not cfg.get("enabled", True):
             continue
-        src = cfg.get("source") or {}
-        if src.get("account") == account or any(
-                c.get("account") == account for c in (src.get("channels") or [])):
+        # Deliberately via accounts_for() rather than re-deriving from the channel list:
+        # that is the single place `source.default_accounts` is honoured, and duplicating
+        # the rule here is how deals ended up narrowed to india for the harvest while the
+        # watcher still picked up all 30 of its dormant usa channels.
+        if account in accounts_for(n):
             names.append(n)
     return names
+
+
+def accounts_for(name: str) -> list:
+    """Every Telegram account a single vertical draws on.
+
+    Usually one. `movies` is the case that forces this to be a list: its two most recent
+    channels are on `india` and its three largest are on `usa`.
+    """
+    try:
+        cfg = verticals.load_any(name)
+    except Exception:
+        return []
+    src = cfg.get("source") or {}
+
+    # `default_accounts` narrows a vertical that is CONFIGURED for several accounts to
+    # the ones it should actually read. Deals lists 38 channels across both sessions but
+    # is set to india only for now; without this the watcher would happily capture the
+    # 30 dormant usa ones — 816 posts in a two-hour sample — while the harvest CLI, which
+    # already honours the setting, read none of them. One switch, both paths.
+    declared = [a for a in (src.get("default_accounts") or []) if a]
+    if declared:
+        return sorted(set(declared))
+
+    out = {c.get("account") for c in (src.get("channels") or []) if c.get("account")}
+    if src.get("account"):
+        out.add(src["account"])
+    return sorted(a for a in out if a)
+
+
+def accounts_with_verticals() -> list:
+    """Every account any enabled vertical draws on.
+
+    One watcher can cover one account, so this is the list of watchers a supervisor
+    needs to start. Holding two DIFFERENT sessions at once is fine — they are separate
+    authorizations; it is two clients on ONE session that revokes an auth key.
+    """
+    out = set()
+    for n in verticals.available_any():
+        if n.startswith("_"):
+            continue
+        out.update(accounts_for(n))
+    return sorted(out)
 
 
 def file_meta(msg) -> dict | None:
@@ -254,59 +298,71 @@ async def run(vertical=None, account: str | None = None,
 
     stop = asyncio.Event()
 
-    async with tgclient.connected(account) as (client, row):
-        # ---- 1. close the gap the 6-hour handoff left ----
-        log("replaying gap since last cursor…")
-        stats["replayed"] = await replay_gap(client, chans)
-        log(f"gap closed: {stats['replayed']} message(s) captured")
+    # Everything below runs inside a try/finally so the lease is released on EVERY exit
+    # path, not just the tidy one.
+    #
+    # It used to be released by a bare statement after the `async with`, which a
+    # cancellation or an exception skipped entirely. That matters twice over now:
+    # `docker stop -t 60 tg-agent` sends SIGTERM and this function installs no handler
+    # when `duration_s` is set (which the supervisor always does), so the old path left
+    # the lease held until its 300-second TTL expired — exactly the window the next
+    # runner needs it in. And the supervisor now runs one of these per account, so a
+    # cancelled sibling must not strand a session either.
+    try:
+        async with tgclient.connected(account) as (client, row):
+            # ---- 1. close the gap the 6-hour handoff left ----
+            log("replaying gap since last cursor…")
+            stats["replayed"] = await replay_gap(client, chans)
+            log(f"gap closed: {stats['replayed']} message(s) captured")
 
-        # ---- 2. go live ----
-        @client.on(events.NewMessage(chats=list(chans)))
-        async def on_new(event):
-            try:
-                cid = utils.get_peer_id(await event.get_chat())
-                meta = chans.get(cid)
-                if not meta:
-                    return
-                row = capture(event.message, {**meta, "channel_id": cid})
-                adb.advance_cursor(cid, event.message.id)
-                if row:
-                    stats["live"] += 1
-                    log(f"  + {meta['tier']:<6} {meta['title'][:30]:<32} "
-                        f"msg {event.message.id} ({len(event.message.message or '')} ch)")
-                else:
-                    stats["duplicates"] += 1
-            except Exception as e:
-                stats["errors"] += 1
-                adb.dead_letter("watcher", type(e).__name__, str(e),
-                                context={"message_id": getattr(event.message, "id", None)})
-                log(f"  ! handler error {type(e).__name__}: {str(e)[:80]}")
-
-        async def beat():
-            while not stop.is_set():
-                await asyncio.sleep(HEARTBEAT_SECONDS)
-                adb.heartbeat(account, WORKER_ID, LEASE_SECONDS)
-
-        beater = asyncio.create_task(beat())
-        if duration_s:
-            log(f"live — running {duration_s}s")
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=duration_s)
-            except asyncio.TimeoutError:
-                pass
-        else:
-            log("live — Ctrl-C to stop")
-            for sig in (signal.SIGINT, signal.SIGTERM):
+            # ---- 2. go live ----
+            @client.on(events.NewMessage(chats=list(chans)))
+            async def on_new(event):
                 try:
-                    asyncio.get_running_loop().add_signal_handler(sig, stop.set)
-                except NotImplementedError:
-                    pass          # Windows
-            await stop.wait()
+                    cid = utils.get_peer_id(await event.get_chat())
+                    meta = chans.get(cid)
+                    if not meta:
+                        return
+                    row = capture(event.message, {**meta, "channel_id": cid})
+                    adb.advance_cursor(cid, event.message.id)
+                    if row:
+                        stats["live"] += 1
+                        log(f"  + {meta['tier']:<6} {meta['title'][:30]:<32} "
+                            f"msg {event.message.id} ({len(event.message.message or '')} ch)")
+                    else:
+                        stats["duplicates"] += 1
+                except Exception as e:
+                    stats["errors"] += 1
+                    adb.dead_letter("watcher", type(e).__name__, str(e),
+                                    context={"message_id": getattr(event.message, "id", None)})
+                    log(f"  ! handler error {type(e).__name__}: {str(e)[:80]}")
 
-        stop.set()
-        beater.cancel()
+            async def beat():
+                while not stop.is_set():
+                    await asyncio.sleep(HEARTBEAT_SECONDS)
+                    adb.heartbeat(account, WORKER_ID, LEASE_SECONDS)
 
-    adb.release_lease(account, WORKER_ID)
+            beater = asyncio.create_task(beat())
+            if duration_s:
+                log(f"live — running {duration_s}s")
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=duration_s)
+                except asyncio.TimeoutError:
+                    pass
+            else:
+                log("live — Ctrl-C to stop")
+                for sig in (signal.SIGINT, signal.SIGTERM):
+                    try:
+                        asyncio.get_running_loop().add_signal_handler(sig, stop.set)
+                    except NotImplementedError:
+                        pass          # Windows
+                await stop.wait()
+
+            stop.set()
+            beater.cancel()
+
+    finally:
+        adb.release_lease(account, WORKER_ID)
     log(f"stopped — replayed {stats['replayed']}, live {stats['live']}, "
         f"dupes {stats['duplicates']}, errors {stats['errors']}")
     return stats

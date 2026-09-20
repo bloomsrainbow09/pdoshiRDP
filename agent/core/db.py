@@ -122,6 +122,59 @@ def pending_events(limit: int = 200, production_only: bool = False,
 
 # -------------------------------------------------------------------- runs ----
 
+PARK_PREFIX = "parked:"
+
+
+def park_undrained(drained, limit: int = 5000) -> dict:
+    """Give a terminal decision to events belonging to verticals nobody drains.
+
+    Capture and delivery are deliberately separable: the runner watches every vertical
+    on an account but emails only the proven ones, so a newly added niche accumulates a
+    corpus before its untested prompts are allowed near an inbox. The side effect is a
+    pile of rows that will never be decided — 2,510 within the first hour of deploying
+    multi-vertical capture, growing by roughly two thousand a cycle.
+
+    **The problem with leaving them is diagnostic, not performance.** The pending query
+    is indexed and would not care. But "how many undecided events are there" is the
+    health signal for this pipeline — a trading message stuck mid-pipeline shows up
+    there — and it stops meaning anything once thousands of rows sit undecided by
+    design. A real fault would be invisible in the noise.
+
+    So they are parked: a terminal `discard` carrying a reason, which satisfies the
+    no-silent-drop invariant, keeps the corpus (text, raw and all fields are untouched),
+    and leaves the pending count meaning what it used to mean.
+
+    Reversible on purpose. The reason is prefixed so the rows are findable, and starting
+    to drain a vertical later is:
+
+        UPDATE content.agent_events SET decision = NULL, decision_reason = NULL
+        WHERE decision_reason LIKE 'parked:%' AND vertical = 'movies';
+    """
+    names = [drained] if isinstance(drained, str) else list(drained or [])
+    if not names:
+        return {"parked": 0, "skipped": "no drained verticals given"}
+    rows = edb.fetch_all(
+        """UPDATE content.agent_events SET
+               decision = 'discard',
+               decision_reason = %s || vertical || %s,
+               decided_at = now(),
+               status = 'decided'
+           WHERE id IN (
+               SELECT id FROM content.agent_events
+               WHERE decision IS NULL
+                 AND vertical IS NOT NULL
+                 AND vertical <> ALL(%s)
+               ORDER BY id LIMIT %s)
+           RETURNING vertical""",
+        (PARK_PREFIX, " is captured for its corpus but is not in DRAIN_VERTICALS, so "
+                      "nothing emails it yet. The message itself is kept in full.",
+         names, limit))
+    by = {}
+    for r in rows:
+        by[r["vertical"]] = by.get(r["vertical"], 0) + 1
+    return {"parked": len(rows), "by_vertical": by}
+
+
 def record_run(role: str, res, event_id: int | None = None, cost: float = 0.0) -> None:
     """Log one model call. `res` is an llm.Result."""
     edb.execute(
