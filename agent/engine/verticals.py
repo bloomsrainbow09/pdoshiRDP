@@ -37,9 +37,65 @@ def channels(cfg: dict, enabled_only: bool = True) -> list:
     return [c for c in chans if c.get("enabled", True)] if enabled_only else chans
 
 
+def load_remote(name: str) -> dict | None:
+    """The definition as last synced into Supabase, or None.
+
+    This is what a runner reads. The runner repo is PUBLIC — that is what buys the free
+    Actions minutes the whole design rests on — so a vertical whose channel list should
+    not be world-readable ships its CODE to the repo and keeps its `vertical.json` and
+    `tiers.json` here instead. Supabase is private; git history is forever.
+    """
+    try:
+        r = db.fetch_one("SELECT config FROM content.verticals WHERE name = %s", (name,))
+    except Exception:
+        return None
+    if not r or not r.get("config"):
+        return None
+    cfg = r["config"]
+    return json.loads(cfg) if isinstance(cfg, str) else cfg
+
+
+def load_any(name: str) -> dict:
+    """Disk first, then Supabase. Raises only when neither has it.
+
+    Disk wins because it is the hand-edited source of truth and a developer editing
+    `vertical.json` must see the edit take effect without a sync. On a runner there is no
+    file, so the database answers.
+    """
+    path = DIR / name / "vertical.json"
+    if path.is_file():
+        return json.loads(path.read_text(encoding="utf-8"))
+    cfg = load_remote(name)
+    if cfg is None:
+        raise SystemExit(f"vertical '{name}' is neither on disk ({path}) nor in "
+                         f"content.verticals. Run: run.py vertical sync {name}")
+    return cfg
+
+
+def available_any() -> list:
+    """Every vertical this process can see, from disk and from Supabase."""
+    names = set(available())
+    try:
+        for r in db.fetch_all("SELECT name FROM content.verticals WHERE is_enabled"):
+            names.add(r["name"])
+    except Exception:
+        pass
+    return sorted(names)
+
+
 def sync(name: str) -> dict:
-    """Push the definition into Supabase and tag every channel with the vertical."""
+    """Push the definition into Supabase and tag every channel with the vertical.
+
+    `tiers.json` is carried inside the same blob under `_tiers`. The watcher needs the
+    tier placements to know which channels to watch, and shipping that file to a public
+    repo would publish the channel list it is supposed to keep out of there — so it
+    travels with the config rather than alongside it.
+    """
+    from engine import tiers as _tiers
     cfg = load(name)
+    tp = _tiers.path(name)
+    if tp.is_file():
+        cfg = {**cfg, "_tiers": json.loads(tp.read_text(encoding="utf-8"))}
     db.upsert("content.verticals", "name", name,
               display_name=cfg.get("display_name") or name,
               is_enabled=cfg.get("enabled", True),

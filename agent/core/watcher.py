@@ -52,16 +52,105 @@ def log(msg: str) -> None:
     print(f"[{datetime.now(timezone.utc):%H:%M:%S}] {msg}", flush=True)
 
 
-def watched_channels(vertical: str | None = None) -> dict:
-    vertical = vertical or active.name()
-    """{channel_id: {title, tier, category}} for every channel in a watched tier."""
-    placements = tiers.load(vertical)["placements"]
-    out = {}
-    for cid, p in placements.items():
-        if p.get("tier") in WATCHED_TIERS:
-            out[int(cid)] = {"title": p.get("title") or cid,
-                             "tier": p["tier"], "category": p.get("category", "")}
+def watched_channels(vertical=None, account: str | None = None) -> dict:
+    """{channel_id: {title, tier, category, vertical, account}} for watched channels.
+
+    `vertical` may be one name or several. Several is not a convenience — it is the only
+    way to watch more than one niche on a shared Telegram account. A session's lease can
+    be held by exactly one client (two clients on one session from two IPs is
+    AuthKeyDuplicatedError, permanent, phone required to recover), so trading, movies and
+    deals on `india` cannot each run a watcher. They share one, and every channel carries
+    the name of the vertical that owns it so the drain can route it back.
+
+    `account` filters to the channels reachable from one session. A vertical may span
+    accounts — movies does — so this is per channel, falling back to the vertical's own
+    `source.account` when a placement does not say.
+    """
+    names = ([vertical] if isinstance(vertical, str) else
+             list(vertical) if vertical else [active.name()])
+    out: dict = {}
+    for name in names:
+        try:
+            placements = tiers.load(name)["placements"]
+        except Exception as e:
+            log(f"  ! vertical '{name}' has no usable tiers.json: {type(e).__name__}")
+            continue
+        try:
+            default_account = (verticals.load_any(name).get("source") or {}).get("account")
+        except Exception:
+            default_account = None
+        for cid, p in placements.items():
+            if p.get("tier") not in WATCHED_TIERS:
+                continue
+            acct = p.get("account") or default_account
+            if account and acct and acct != account:
+                continue
+            cid = int(cid)
+            if cid in out:
+                # One channel claimed by two verticals would be captured once and routed
+                # to whichever loaded last — a silent, order-dependent misrouting. Refuse
+                # rather than pick.
+                log(f"  ! channel {cid} is claimed by both '{out[cid]['vertical']}' and "
+                    f"'{name}'; keeping '{out[cid]['vertical']}'")
+                continue
+            out[cid] = {"title": p.get("title") or cid, "tier": p["tier"],
+                        "category": p.get("category", ""), "vertical": name,
+                        "account": acct}
     return out
+
+
+def verticals_on(account: str) -> list:
+    """Every enabled vertical that draws from `account`, by name.
+
+    Read from `vertical.json` rather than hard-coded so adding a niche to a shared
+    account is a config change, not a code change.
+    """
+    names = []
+    # `available_any()` and not a directory scan: a runner has no folder for a vertical
+    # whose channel list is kept out of the public repo, so those exist only in
+    # content.verticals and a scan of verticals/ would miss exactly the ones that matter.
+    for n in verticals.available_any():
+        if n.startswith("_"):
+            continue
+        try:
+            cfg = verticals.load_any(n)
+        except Exception:
+            continue
+        if not cfg.get("enabled", True):
+            continue
+        src = cfg.get("source") or {}
+        if src.get("account") == account or any(
+                c.get("account") == account for c in (src.get("channels") or [])):
+            names.append(n)
+    return names
+
+
+def file_meta(msg) -> dict | None:
+    """Filename, size, dimensions and duration of an attached document, or None.
+
+    `has_media` and `media_kind` say THAT a file arrived, never WHICH. For a vertical
+    whose content is a human sentence that is enough — trading reads the text. For a
+    file-centric one it is nothing at all: a movie channel posts
+    `Enola.Holmes.3.2026.1080p.WEB-DL.mkv` with an empty caption, and an event recording
+    only `media_kind='video'` has discarded the entire message.
+
+    This is deliberately generic — filename, bytes, mime, w/h, duration are Telegram
+    facts, not movie facts — and it lands in the existing `raw` jsonb rather than adding
+    columns, so no vertical that does not care ever sees it.
+    """
+    doc = getattr(getattr(msg, "media", None), "document", None)
+    if doc is None:
+        return None
+    name = dur = w = h = None
+    for a in getattr(doc, "attributes", []) or []:
+        cls = type(a).__name__
+        if cls == "DocumentAttributeFilename":
+            name = a.file_name
+        elif cls == "DocumentAttributeVideo":
+            dur, w, h = getattr(a, "duration", None), a.w, a.h
+    return {"file_name": name, "bytes": getattr(doc, "size", None),
+            "mime": getattr(doc, "mime_type", None),
+            "width": w, "height": h, "duration_s": dur}
 
 
 def capture(msg, meta: dict) -> dict | None:
@@ -72,6 +161,7 @@ def capture(msg, meta: dict) -> dict | None:
     """
     urls = ingest.extract_urls(msg)
     text = msg.message or ""
+    fm = file_meta(msg)
     return adb.record_event(
         channel_id=meta["channel_id"], message_id=msg.id,
         channel_title=meta["title"], tier=meta["tier"],
@@ -79,6 +169,8 @@ def capture(msg, meta: dict) -> dict | None:
         text=text, urls=urls,
         has_media=bool(msg.media), media_kind=ingest.media_kind(msg),
         content_hash=ingest.content_hash(text, urls),
+        raw={"file": fm} if fm else None,
+        vertical=meta.get("vertical"),
         status="received",
     )
 
@@ -117,20 +209,48 @@ async def replay_gap(client, chans: dict, limit_per_channel: int = 500) -> int:
     return sum(counts)
 
 
-async def run(vertical: str | None = None, account: str | None = None,
+async def run(vertical=None, account: str | None = None,
               duration_s: int | None = None) -> dict:
+    """Watch one account. `vertical` may be one name, several, or "*".
+
+    "*" means every enabled vertical that draws from this account, which is the form the
+    supervisor uses: adding a niche to a shared account then needs no code change and no
+    second process, because a second process is the one thing that cannot be allowed —
+    only one client may hold a session's lease.
+    """
     adb.migrate()
-    cfg = verticals.load(vertical)
-    account = account or cfg.get("source", {}).get("account")
-    chans = watched_channels(vertical)
-    stats = {"replayed": 0, "live": 0, "duplicates": 0, "errors": 0}
+    if vertical == "*":
+        if not account:
+            raise ValueError("vertical='*' needs an account to resolve against")
+        names = verticals_on(account) or [active.name()]
+    elif isinstance(vertical, str) or vertical is None:
+        names = [vertical or active.name()]
+    else:
+        names = list(vertical)
+
+    if not account:
+        for n in names:
+            try:
+                account = (verticals.load_any(n).get("source") or {}).get("account")
+            except Exception:
+                account = None
+            if account:
+                break
+
+    chans = watched_channels(names, account)
+    stats = {"replayed": 0, "live": 0, "duplicates": 0, "errors": 0,
+             "verticals": names}
 
     if not adb.acquire_lease(account, WORKER_ID, LEASE_SECONDS):
         log(f"another watcher holds the lease for '{account}' — refusing to start. "
             f"Two clients on one session risk the auth key being revoked.")
         return {**stats, "refused": True}
+    by_v = {}
+    for m in chans.values():
+        by_v[m["vertical"]] = by_v.get(m["vertical"], 0) + 1
     log(f"lease acquired: worker {WORKER_ID}, account '{account}', "
-        f"{len(chans)} channels in {sorted(WATCHED_TIERS)}")
+        f"{len(chans)} channels in {sorted(WATCHED_TIERS)} across "
+        f"{len(by_v)} vertical(s): {by_v}")
 
     stop = asyncio.Event()
 

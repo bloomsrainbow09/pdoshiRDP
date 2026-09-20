@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS content.source_accounts (
 );
 
 -- One row per channel we pull from. `folder` mirrors the Telegram chat folder
--- ("Trading", "Dealdost"), which is the natural grouping to drive a destination.
+-- ("Trading", "Movies"), which is the natural grouping to drive a destination.
 CREATE TABLE IF NOT EXISTS content.source_channels (
     id              bigint  PRIMARY KEY,          -- Telegram peer id, stable
     account_label   text    NOT NULL REFERENCES content.source_accounts(label) ON DELETE CASCADE,

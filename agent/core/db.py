@@ -87,19 +87,34 @@ def decide(event_id: int, decision: str, reason: str, **f) -> None:
 TEST_BANDS = (-1_000_000_000, -900_000_000)
 
 
-def pending_events(limit: int = 200, production_only: bool = False) -> list:
+def pending_events(limit: int = 200, production_only: bool = False,
+                   verticals=None) -> list:
     """Received but never decided — the replay set after a crash.
 
     `production_only` excludes the reserved test bands. The soak needs it: its drain was
     picking up 125 undecided rows from an evaluation run and spending the whole tick on
     them, so the soak stalled and the eval was processed twice. Replay and the eval
     harness deliberately leave it off, because operating on those bands is their job.
+
+    `verticals` limits the drain to rows owned by the named verticals, and exists to
+    separate CAPTURE from DELIVERY. One watcher now captures for every vertical sharing
+    an account, because only one client may hold a session's lease — but a newly added
+    niche should not start emailing on its first cycle with prompts that have never seen
+    its corpus. Capturing it while draining only the proven ones lets the corpus
+    accumulate first, which is the only way to derive a real taxonomy for it.
+
+    A NULL `vertical` is always included: those rows predate the column and belong to
+    whatever vertical the process is serving.
     """
     where = "decision IS NULL"
     params: tuple = ()
     if production_only:
         where += " AND (channel_id IS NULL OR channel_id NOT BETWEEN %s AND %s)"
         params = TEST_BANDS
+    if verticals:
+        names = [verticals] if isinstance(verticals, str) else list(verticals)
+        where += " AND (vertical IS NULL OR vertical = ANY(%s))"
+        params = params + (names,)
     return edb.fetch_all(
         f"SELECT * FROM content.agent_events WHERE {where} ORDER BY id LIMIT %s",
         params + (limit,))

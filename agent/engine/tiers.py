@@ -36,9 +36,21 @@ def path(name: str):
 
 
 def load(name: str) -> dict:
+    """Placements from disk, else from the synced config in Supabase.
+
+    A runner has no `tiers.json` for a vertical whose channel list is deliberately kept
+    out of the public repo, so `verticals.sync()` carries it inside the config blob under
+    `_tiers` and this reads it back. Returning empty placements instead would be worse
+    than an error: the watcher would start, find nothing in a watched tier, and quietly
+    watch zero channels.
+    """
     p = path(name)
     if p.is_file():
         return json.loads(p.read_text(encoding="utf-8"))
+    cfg = verticals.load_remote(name) or {}
+    remote = cfg.get("_tiers")
+    if remote:
+        return remote
     return {"placements": {}, "labels": TIER_LABELS}
 
 

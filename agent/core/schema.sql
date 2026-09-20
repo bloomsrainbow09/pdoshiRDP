@@ -179,3 +179,19 @@ COMMENT ON COLUMN content.trade_calls.entry IS
 -- The sub-agent's structured result, kept on the event so P8 can compose an email from
 -- facts rather than re-deriving them from the raw text with another model call.
 ALTER TABLE content.agent_events ADD COLUMN IF NOT EXISTS agent_outcome jsonb;
+
+-- ------------------------------------------------------- multi-vertical capture ----
+-- Which vertical owns this event.
+--
+-- Only ONE client may hold a Telegram session's lease — two clients on one session from
+-- two IPs is AuthKeyDuplicatedError, permanent, and recovering it needs a human with a
+-- phone. So several verticals sharing an account cannot each run their own watcher;
+-- they have to share one, and the drain then needs to know which plugin owns each row.
+--
+-- NULL means "written before this column existed", and `orchestrator.ctx(None)` resolves
+-- that to the active vertical — exactly the behaviour those rows were processed with.
+ALTER TABLE content.agent_events ADD COLUMN IF NOT EXISTS vertical text;
+CREATE INDEX IF NOT EXISTS agent_events_vertical_idx ON content.agent_events (vertical);
+-- The drain's hot query: undecided rows, optionally for one vertical.
+CREATE INDEX IF NOT EXISTS agent_events_pending_vertical_idx
+    ON content.agent_events (vertical, id) WHERE decision IS NULL;

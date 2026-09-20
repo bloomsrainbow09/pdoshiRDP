@@ -70,12 +70,34 @@ REPORT_EVERY_S = 900          # the daily report is date-keyed; this only checks
 
 WORKER = os.environ.get("WORKER_ID") or f"sup-{uuid.uuid4().hex[:8]}"
 
+# Which verticals this runner CAPTURES, and which it DRAINS. They are separate on
+# purpose and the defaults are deliberately asymmetric.
+#
+# Capture defaults to "*" — every enabled vertical drawing on this account. It has to be
+# all-or-nothing at the client level anyway: only one client may hold a Telegram
+# session's lease, so a second vertical on the same account cannot run its own watcher,
+# and the choice is "one watcher for all of them" or "the others never get read". Widening
+# capture is also cheap and safe: it writes rows to agent_events and sends nothing.
+#
+# Drain defaults to the ACTIVE vertical alone, because draining is what sends email. A
+# niche added today has prompts that have never seen its own corpus — deals' taxonomy is
+# marked `provisional: true` for exactly this reason — and letting it email on its first
+# cycle would be untuned output to a real inbox. Capture it, accumulate the corpus,
+# derive the taxonomy from real messages, then add it here.
+#
+#     WATCH_VERTICALS=*                 capture everything on this account (default)
+#     DRAIN_VERTICALS=trading           email only trading (default: the active vertical)
+#     DRAIN_VERTICALS=trading,movies    once a niche's prompts are proven
+WATCH_VERTICALS = os.environ.get("WATCH_VERTICALS", "*").strip() or "*"
+DRAIN_VERTICALS = [x for x in
+                   (os.environ.get("DRAIN_VERTICALS") or "").split(",") if x.strip()]
+
 
 def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] supervisor: {msg}", flush=True)
 
 
-async def _run_watcher(vertical: str, account: str, seconds: int) -> dict:
+async def _run_watcher(vertical, account: str, seconds: int) -> dict:
     """Start the watcher, retrying while another runner still holds the lease.
 
     The retry wraps `watcher.run()` itself rather than probing the lease first. An
@@ -144,7 +166,19 @@ async def run(seconds: int, vertical: str | None = None,
     v = vertical or active.name()
     plugin = registry.current()
     cfg_account = account or watcher.verticals.load(v).get("source", {}).get("account")
+
+    watch = WATCH_VERTICALS if WATCH_VERTICALS != "*" else "*"
+    drain = DRAIN_VERTICALS or [v]
+    if watch == "*":
+        capturing = watcher.verticals_on(cfg_account) or [v]
+    else:
+        capturing = [x.strip() for x in watch.split(",") if x.strip()]
     log(f"vertical={v} plugin={plugin.name} account={cfg_account} worker={WORKER}")
+    log(f"capturing {capturing} | draining (emailing) {drain}")
+    if set(capturing) - set(drain):
+        log(f"  note: {sorted(set(capturing) - set(drain))} are captured but NOT "
+            f"emailed — their rows accumulate for taxonomy derivation. Add them to "
+            f"DRAIN_VERTICALS once their prompts are validated.")
 
     if do_sleep:
         log(f"sleeping {HANDOFF_SLEEP_S}s before touching Telegram — the previous "
@@ -174,9 +208,9 @@ async def run(seconds: int, vertical: str | None = None,
         return None
 
     tasks = [
-        asyncio.create_task(_run_watcher(v, cfg_account, seconds), name="watcher"),
+        asyncio.create_task(_run_watcher(capturing, cfg_account, seconds), name="watcher"),
         asyncio.create_task(_every(DRAIN_EVERY_S, "drain",
-                                   lambda: orchestrator.run(limit=200), stop), name="drain"),
+                                   lambda: orchestrator.run(limit=200, verticals=drain), stop), name="drain"),
         asyncio.create_task(_every(DELIVER_EVERY_S, "deliver",
                                    lambda: send.run(limit=50), stop), name="deliver"),
         asyncio.create_task(_every(REPORT_EVERY_S, "report", _report, stop), name="report"),
@@ -197,7 +231,7 @@ async def run(seconds: int, vertical: str | None = None,
     # rather than waiting for the next runner.
     log("final drain + deliver before exit")
     try:
-        await orchestrator.run(limit=500)
+        await orchestrator.run(limit=500, verticals=drain)
         send.run(limit=200)
     except Exception as e:
         log(f"final pass FAILED {type(e).__name__}: {str(e)[:160]}")

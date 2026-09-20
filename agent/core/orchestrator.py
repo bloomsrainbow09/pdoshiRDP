@@ -42,9 +42,57 @@ from core import active  # noqa: E402
 VERTICAL = registry.current()
 
 
-def has_material_signal(text: str) -> bool:
+class _Ctx:
+    """Everything the pipeline needs from ONE vertical, resolved once and cached.
+
+    These six values used to be module-level constants read off `registry.current()` at
+    import, which encoded "one vertical per process" — the limitation `core/active.py`
+    documents. That was right while one Telegram client served one niche.
+
+    It stops being right the moment several verticals share an account. Only one client
+    may hold a session's lease, so watching trading, movies and deals on `india` means
+    ONE watcher capturing for all three — and then the drain has to route each event to
+    the plugin that owns it, which a module-level constant cannot do.
+
+    So the constants became a lookup keyed by the event's `vertical`. An event with no
+    vertical (every row written before this existed) resolves to the active one, so the
+    single-vertical path is unchanged in behaviour and in cost: the cache means one
+    plugin load per name for the life of the process, exactly as before.
+    """
+
+    __slots__ = ("plugin", "taxonomy", "intents", "guard_categories",
+                 "ledger_agents", "threshold")
+
+    def __init__(self, plugin):
+        self.plugin = plugin
+        self.taxonomy = plugin.taxonomy
+        self.intents = self.taxonomy["intents"]
+        # The categories the GUARD may return. Deliberately NOT the same set as
+        # subagents.DROPPABLE — that one also carries `filtered`, which the guard
+        # never returns.
+        self.guard_categories = scaffold.droppable(self.taxonomy)
+        # Which agents produce a row in the accuracy ledger. Read from the vertical so
+        # core never names an agent; absent, nothing is ledgered, which is right for a
+        # niche that makes no checkable predictions.
+        self.ledger_agents = set(getattr(plugin, "ledger_agents", lambda: set())())
+        self.threshold = float(self.taxonomy["confidence_threshold"]["value"])
+
+
+_CTX: dict = {}
+
+
+def ctx(vertical: str | None = None) -> _Ctx:
+    """The pipeline context for `vertical`, or for the active one when None."""
+    key = (vertical or active.name()).strip() or active.name()
+    c = _CTX.get(key)
+    if c is None:
+        c = _CTX[key] = _Ctx(registry.load(key))
+    return c
+
+
+def has_material_signal(text: str, vertical: str | None = None) -> bool:
     """Ask the vertical. The orchestrator does not decide what "material" means."""
-    return VERTICAL.has_material_signal(text)
+    return ctx(vertical).plugin.has_material_signal(text)
 
 
 # The name the pipeline used before R5, kept so the gates and the baseline address it
@@ -52,16 +100,15 @@ def has_material_signal(text: str) -> bool:
 has_trading_signal = has_material_signal
 
 CONFIG = json.loads((AGENT / "config" / "models.json").read_text(encoding="utf-8"))
+
+# Module-level aliases for the ACTIVE vertical. Kept because the gates, the baseline and
+# tests/ address them by name, and because every single-vertical caller is still correct
+# reading them. Anything that handles an event now goes through `ctx(ev["vertical"])`
+# instead, so these are a convenience view of one vertical rather than the pipeline's
+# only source of truth.
 TAX = VERTICAL.taxonomy
 INTENTS = TAX["intents"]
-# The categories the GUARD may return. Derived from the taxonomy's discard actions,
-# which is deliberately NOT the same set as subagents.DROPPABLE — that one also
-# carries `filtered`, a decision the guard never makes.
 _GUARD_CATEGORIES = scaffold.droppable(TAX)
-
-# Which agents produce a row in the accuracy ledger. Read from the taxonomy so a vertical
-# declares it rather than core naming one agent; absent, nothing is ledgered, which is the
-# right default for a niche that makes no checkable predictions.
 _LEDGER_AGENTS = set(getattr(VERTICAL, "ledger_agents", lambda: set())())
 THRESHOLD = float(TAX["confidence_threshold"]["value"])
 # guard + router + (router retry) + importance assessor + sub-agent = 5. The cap exists
@@ -117,20 +164,22 @@ async def _ask(client, role: str, system: str, user: str, event_id=None) -> tupl
     return (parsed if isinstance(parsed, dict) else None), res
 
 
-async def _via_subagent(client, ev, budget, eid, t0, common, spec, caveat=None) -> dict:
+async def _via_subagent(client, ev, budget, eid, t0, common, spec, caveat=None,
+                        V=None) -> dict:
     """Hand the event to its sub-agent and record whatever the sub-agent decides.
 
     The sub-agent owns the outcome, with two limits the orchestrator keeps for itself:
     it may not discard a delivery category (that rule lives in `process`, above), and
     if the budget is gone the message escalates rather than going unhandled.
     """
+    V = V or ctx(ev.get("vertical"))
     intent = common["intent"]
     if not budget.take():
         adb.decide(eid, "escalate", f"{intent}: budget exhausted before the sub-agent "
                                     f"could run — escalated rather than dropped", **common)
         return {"decision": "escalate", "intent": intent, "ms": _ms(t0)}
 
-    out = await subagents.run(VERTICAL.subagent_for((common or {}).get('intent')),
+    out = await subagents.run(V.plugin.subagent_for((common or {}).get('intent')),
                               client, ev, common)
     if caveat:
         out.caveats = list(out.caveats) + [caveat]
@@ -140,7 +189,7 @@ async def _via_subagent(client, ev, budget, eid, t0, common, spec, caveat=None) 
     # deciding a whole delivery category is not interesting is not its call to make.
     decision = out.action
     if decision == "discard" and spec["action"] not in ("discard", "assess_importance"):
-        if out.agent not in _LEDGER_AGENTS:
+        if out.agent not in V.ledger_agents:
             decision = "escalate"
             out.reason = (f"sub-agent asked to discard a delivery category; escalated "
                           f"instead — {out.reason}")
@@ -153,6 +202,10 @@ async def _via_subagent(client, ev, budget, eid, t0, common, spec, caveat=None) 
 
 async def process(client, ev: dict) -> dict:
     """Take one event to a terminal decision. Never raises."""
+    # Which vertical owns this event. One watcher can now capture for several on a
+    # shared account, so the plugin is resolved per event rather than per process.
+    # A row with no `vertical` is pre-multi-vertical and resolves to the active one.
+    V = ctx(ev.get("vertical"))
     eid, budget = ev["id"], Budget()
     user = scaffold.user_block(ev)
     t0 = time.perf_counter()
@@ -161,14 +214,14 @@ async def process(client, ev: dict) -> dict:
     # carrying something a trader could act on is never silently dropped — not by the
     # guard, not by a confident router calling it a fragment, and not by the importance
     # assessor. Three doors, one rule.
-    protected = has_trading_signal(ev.get("text") or "")
+    protected = has_material_signal(ev.get("text") or "", ev.get("vertical"))
 
     try:
         # ── stage 1: guard ────────────────────────────────────────────────────
         if not budget.take():
             adb.decide(eid, "escalate", "budget exhausted before guard")
             return {"decision": "escalate", "intent": None}
-        g, gres = await _ask(client, "guard", VERTICAL.guard_prompt(), user, eid)
+        g, gres = await _ask(client, "guard", V.plugin.guard_prompt(), user, eid)
         if g and g.get("drop") is True:
             why = str(g.get("why") or "guard")[:120]
             if protected:
@@ -179,7 +232,7 @@ async def process(client, ev: dict) -> dict:
                 # Record WHICH category it matched, not a generic "filtered". A discard
                 # the reader never sees still has to be explainable a month later.
                 cat = g.get("category")
-                cat = cat if cat in _GUARD_CATEGORIES else "fragment"
+                cat = cat if cat in V.guard_categories else "fragment"
                 adb.decide(eid, "discard", f"guard: {cat} — {why}", intent=cat,
                            router_model=gres.model)
                 return {"decision": "discard", "intent": cat, "ms": _ms(t0)}
@@ -189,18 +242,18 @@ async def process(client, ev: dict) -> dict:
         if not budget.take():
             adb.decide(eid, "escalate", "budget exhausted before router")
             return {"decision": "escalate", "intent": None}
-        r, rres = await _ask(client, "router", VERTICAL.router_prompt(), user, eid)
-        if not r or r.get("intent") not in INTENTS:
+        r, rres = await _ask(client, "router", V.plugin.router_prompt(), user, eid)
+        if not r or r.get("intent") not in V.intents:
             # One retry, then treat as unknown — never crash, never drop.
             if budget.take():
-                r, rres = await _ask(client, "router", VERTICAL.router_prompt(), user, eid)
-            if not r or r.get("intent") not in INTENTS:
+                r, rres = await _ask(client, "router", V.plugin.router_prompt(), user, eid)
+            if not r or r.get("intent") not in V.intents:
                 r = {"intent": "unknown", "confidence": 0.0,
                      "reasoning": "router returned unusable output twice"}
 
         intent = r["intent"]
         conf = float(r.get("confidence") or 0)
-        spec = INTENTS[intent]
+        spec = V.intents[intent]
         common = dict(intent=intent, confidence=conf, router_model=rres.model,
                       reasoning=str(r.get("reasoning") or "")[:500],
                       entities=r.get("entities") or {})
@@ -214,7 +267,7 @@ async def process(client, ev: dict) -> dict:
         # The second door. The guard let "ZOMATO HIT UPPER CIRCUIT" through and the
         # ROUTER then called it a fragment with high confidence, which discarded it just
         # as effectively.
-        if spec["action"] == "discard" and conf >= THRESHOLD and not protected:
+        if spec["action"] == "discard" and conf >= V.threshold and not protected:
             adb.decide(eid, "discard", f"{intent} (confidence {conf:.2f})", **common)
             return {"decision": "discard", "intent": intent, "ms": _ms(t0)}
         if spec["action"] == "discard" and protected:
@@ -224,7 +277,7 @@ async def process(client, ev: dict) -> dict:
             return {"decision": "escalate", "intent": intent, "ms": _ms(t0)}
 
         # ── stage 3b: confident and deliverable ───────────────────────────────
-        if conf >= THRESHOLD and spec["action"] not in ("discard", "assess_importance"):
+        if conf >= V.threshold and spec["action"] not in ("discard", "assess_importance"):
             return await _via_subagent(client, ev, budget, eid, t0, common, spec)
 
         # ── stage 3c: unknown, or not confident -> importance assessor ────────
@@ -234,7 +287,7 @@ async def process(client, ev: dict) -> dict:
         if not budget.take():
             adb.decide(eid, "escalate", f"{intent} unconfident, budget exhausted", **common)
             return {"decision": "escalate", "intent": intent, "ms": _ms(t0)}
-        a, _ = await _ask(client, "analyst", VERTICAL.importance_prompt(), user, eid)
+        a, _ = await _ask(client, "analyst", V.plugin.importance_prompt(), user, eid)
         if a and a.get("notify") is True:
             return await _via_subagent(
                 client, ev, budget, eid, t0, common, spec,
@@ -310,10 +363,16 @@ def _ms(t0: float) -> int:
 
 
 async def run(limit: int = 100, concurrency: int | None = None,
-              production_only: bool = False) -> dict:
-    """Drain undecided events. Safe to run repeatedly; picks up where it stopped."""
+              production_only: bool = False, verticals=None) -> dict:
+    """Drain undecided events. Safe to run repeatedly; picks up where it stopped.
+
+    `verticals` narrows the drain. Capture and delivery are deliberately separable:
+    one watcher captures for every vertical sharing a Telegram account, but a niche
+    whose prompts have never seen its own corpus should accumulate one before it
+    starts emailing. Omit it to drain everything.
+    """
     adb.migrate()
-    todo = adb.pending_events(limit, production_only)
+    todo = adb.pending_events(limit, production_only, verticals)
     if not todo:
         return {"processed": 0}
     conc = concurrency or CONFIG["defaults"]["concurrency"]
